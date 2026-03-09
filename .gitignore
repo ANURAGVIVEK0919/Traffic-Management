@@ -1,4 +1,34 @@
 # Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node.js
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE files
+.vscode/
+.idea/
+
+# Build
+build/
+dist/
+
+# Misc
+*.swp
+*.swo
+
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
