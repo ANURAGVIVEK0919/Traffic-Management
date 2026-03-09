@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+*.egg
+*.eggs
+*.env
+.env/
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+*.eggs/
+*.whl
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Other
+*.sqlite3
+*.db
+
+# Models
+*.pth
+*.pt
+
+# Data
+*.csv
+*.tsv
+*.yaml
+*.yml
+
+# Ignore frontend build
+traffic-sim/frontend/build/
+
+# Ignore backend cache
+traffic-sim/backend/__pycache__/
+
+# Ignore virtual environments
+traffic-sim/backend/.venv/
+traffic-sim/.venv/
+
+# Ignore test outputs
+htmlcov/
+.coverage
+
+# Ignore driveindia raw data
+traffic-sim/data/driveindia/images/
+traffic-sim/data/driveindia/labels/
+
+# Ignore dataset images
+traffic-sim/data/dataset1/train/images/
+traffic-sim/data/dataset1/valid/images/
+traffic-sim/data/dataset2/train/images/
+traffic-sim/data/dataset2/valid/images/
+
+# Ignore dataset labels
+traffic-sim/data/dataset1/train/labels/
+traffic-sim/data/dataset1/valid/labels/
+traffic-sim/data/dataset2/train/labels/
+traffic-sim/data/dataset2/valid/labels/
+
+# Ignore merged datasets
+traffic-sim/data/merge_datasets.py
