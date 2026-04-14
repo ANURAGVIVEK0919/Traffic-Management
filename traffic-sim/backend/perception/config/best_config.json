@@ -1,0 +1,13 @@
+{
+  "frame_skip": 2,
+  "min_track_frames": 5,
+  "movement_ratio": 0.010834705943388393,
+  "confidence_threshold": 0.4,
+  "lane_vote_threshold": 2,
+  "outlier_std_factor": 2.0,
+  "smoothing_window": 1,
+  "std_threshold": 2.0,
+  "count_low_threshold": 1.0,
+  "count_high_threshold": 12.0,
+  "enable_confidence_weighting": false
+}
