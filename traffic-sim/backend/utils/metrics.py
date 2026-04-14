@@ -21,8 +21,9 @@ def compute_co2_estimate(wait_time_records):
 	}
 	total = 0.0
 	for rec in wait_time_records:
-		rate = rates.get(rec['vehicleType'], 2.0)
-		total += rate * rec['waitTime']
+		rate = rates.get(rec.get('vehicleType') if isinstance(rec, dict) else None, 2.0)
+		wait_time = rec.get('waitTime') if isinstance(rec, dict) else None
+		total += rate * (0 if wait_time is None else wait_time)
 	return float(total)
 
 # Compute green utilization percentage

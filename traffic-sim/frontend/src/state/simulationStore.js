@@ -3,6 +3,7 @@ import { create } from 'zustand'  // Zustand import
 
 const initialState = {
 	status: 'setup',
+	mode: 'simulation',
 	timer: null,
 	sessionId: null,
 	lanes: {
@@ -18,6 +19,8 @@ const initialState = {
 		west: 'red'
 	},
 	eventLog: [],
+	signalPhases: [],
+	totalVehiclesCrossed: 0,
 	tickCount: 0,
 	timeRemaining: null
 }
@@ -37,17 +40,15 @@ export const useSimulationStore = create((set) => ({
 		status: 'placement'
 	})),
 
+	// Set display mode for simulation data source
+	setMode: (mode) => set(() => ({
+		mode: mode === 'video' ? 'video' : 'simulation'
+	})),
+
 	// Set status to running and reset relevant fields
 	startSimulation: () => set((state) => ({
 		status: 'running',
-		eventLog: [],
 		tickCount: 0,
-		lanes: {
-			north: [],
-			south: [],
-			east: [],
-			west: []
-		},
 		timeRemaining: state.timer
 	})),
 
@@ -80,6 +81,26 @@ export const useSimulationStore = create((set) => ({
 	// Append event to eventLog
 	logEvent: (event) => set((state) => ({
 		eventLog: [...state.eventLog, event]
+	})),
+
+	// Append signal phase summary
+	addSignalPhase: (phase) => set((state) => ({
+		signalPhases: [...state.signalPhases, phase]
+	})),
+
+	// Replace signal phases
+	setSignalPhases: (signalPhases) => set(() => ({
+		signalPhases: Array.isArray(signalPhases) ? signalPhases : []
+	})),
+
+	// Increment crossed vehicle count
+	incrementTotalVehiclesCrossed: (count = 1) => set((state) => ({
+		totalVehiclesCrossed: state.totalVehiclesCrossed + count
+	})),
+
+	// Set crossed vehicle count directly
+	setTotalVehiclesCrossed: (totalVehiclesCrossed) => set(() => ({
+		totalVehiclesCrossed: Number(totalVehiclesCrossed) || 0
 	})),
 
 	// Subtract tickInterval from timeRemaining

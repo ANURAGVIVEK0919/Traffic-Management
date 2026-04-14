@@ -1,109 +1,378 @@
-
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSimulationStore } from '../state/simulationStore';
-import { fetchRLDecision } from '../services/api';
+import { fetchLiveCounts, fetchRLDecision, logSignalPhase } from '../services/api';
 import { buildLaneSnapshot } from '../utils/simulationUtils';
 import { moveVehicles, checkVehicleCrossing } from '../utils/vehicleUtils';
 import { generateVehicleId } from '../utils/simulationUtils';
 import { useNavigate } from 'react-router-dom';
 import TimerControl from '../components/controls/TimerControl';
 
+import AppSidebar from '../components/layout/AppSidebar';
+import Card from '../components/ui/Card';
+import Button from '../components/ui/Button';
+import Section from '../components/ui/Section';
+import './dashboard.css';
+
 const VEHICLE_TYPES = ['car', 'bike', 'ambulance', 'truck', 'bus'];
 const LANE_ORDER = ['north', 'east', 'south', 'west'];
+const MIN_SAFE_TIME = 2;
+const NORMAL_SWITCH_TIME = 8;
+const MAX_GREEN_TIME = 12;
+
+const VEHICLE_ICONS = {
+  car: '🚗',
+  bike: '🚲',
+  ambulance: '🚑',
+  truck: '🚚',
+  bus: '🚌'
+};
 
 export default function SimulationPage() {
+  const [lastDecision, setLastDecision] = useState(null);
+  const [currentGreenLane, setCurrentGreenLane] = useState(null);
+  const [phaseStartTick, setPhaseStartTick] = useState(0);
+  const [signalPhases, setSignalPhases] = useState([]);
+  const [decisionDebugLogs, setDecisionDebugLogs] = useState([]);
+  const [backendCounts, setBackendCounts] = useState({
+    north: 0,
+    south: 0,
+    east: 0,
+    west: 0
+  });
+
   const status = useSimulationStore(state => state.status);
+  const mode = useSimulationStore(state => state.mode);
   const lanes = useSimulationStore(state => state.lanes);
   const lightStates = useSimulationStore(state => state.lightStates);
   const timeRemaining = useSimulationStore(state => state.timeRemaining);
+  const sessionId = useSimulationStore(state => state.sessionId);
+
   const startSimulation = useSimulationStore(state => state.startSimulation);
+  const setMode = useSimulationStore(state => state.setMode);
   const freezeSimulation = useSimulationStore(state => state.freezeSimulation);
   const updateLightStates = useSimulationStore(state => state.updateLightStates);
   const updateVehiclePositions = useSimulationStore(state => state.updateVehiclePositions);
   const logEvent = useSimulationStore(state => state.logEvent);
+  const addSignalPhase = useSimulationStore(state => state.addSignalPhase);
+  const setSignalPhasesStore = useSimulationStore(state => state.setSignalPhases);
+  const incrementTotalVehiclesCrossed = useSimulationStore(state => state.incrementTotalVehiclesCrossed);
+  const setTotalVehiclesCrossed = useSimulationStore(state => state.setTotalVehiclesCrossed);
   const decrementTimer = useSimulationStore(state => state.decrementTimer);
   const incrementTick = useSimulationStore(state => state.incrementTick);
   const addVehicleToLane = useSimulationStore(state => state.addVehicleToLane);
+  const tickCount = useSimulationStore(state => state.tickCount);
 
   const tickingRef = useRef(false);
   const timeRemainingRef = useRef(timeRemaining);
   const lanesRef = useRef(lanes);
+  const lightStatesRef = useRef(lightStates);
+  const tickCountRef = useRef(tickCount);
+  const currentGreenLaneRef = useRef(currentGreenLane);
+  const phaseStartTickRef = useRef(phaseStartTick);
+
   const navigate = useNavigate();
 
   useEffect(() => {
     timeRemainingRef.current = timeRemaining;
   }, [timeRemaining]);
 
-  // Keep lanesRef in sync with lanes state
   useEffect(() => {
     lanesRef.current = lanes;
   }, [lanes]);
 
-  async function runTick() {
-    if (!tickingRef.current) return;
-    if (timeRemainingRef.current <= 0) {
-      freezeSimulation();
-      tickingRef.current = false;
-      return;
+  useEffect(() => {
+    lightStatesRef.current = lightStates;
+  }, [lightStates]);
+
+  useEffect(() => {
+    tickCountRef.current = tickCount;
+  }, [tickCount]);
+
+  useEffect(() => {
+    currentGreenLaneRef.current = currentGreenLane;
+  }, [currentGreenLane]);
+
+  useEffect(() => {
+    phaseStartTickRef.current = phaseStartTick;
+  }, [phaseStartTick]);
+
+  useEffect(() => {
+    if (mode !== 'video') {
+      return undefined;
     }
-    // Use lanesRef.current for RL snapshot and vehicle movement
-    const snapshot = buildLaneSnapshot(lanesRef.current);
-    console.log('Lane snapshot sent to RL:', JSON.stringify(snapshot));
-    const decision = await fetchRLDecision(snapshot);
-    console.log('RL decision:', decision);
-    updateLightStates(decision.lane);
-    const updatedLanes = moveVehicles(lanesRef.current, {
-      north: decision.lane === 'north' ? 'green' : 'red',
-      south: decision.lane === 'south' ? 'green' : 'red',
-      east: decision.lane === 'east' ? 'green' : 'red',
-      west: decision.lane === 'west' ? 'green' : 'red'
-    });
-    const lanesAfterCross = { north: [], east: [], south: [], west: [] };
-    for (const lane of LANE_ORDER) {
-      for (const vehicle of updatedLanes[lane]) {
-        const cross = checkVehicleCrossing(vehicle);
-        if (cross.crossed) {
-          logEvent({
-            eventType: 'vehicle_crossed',
-            vehicleId: vehicle.vehicleId,
-            vehicleType: vehicle.vehicleType,
-            laneId: vehicle.laneId,
-            timestamp: Date.now(),
-            payload: {}
+
+    let cancelled = false;
+
+    const syncLiveCounts = async () => {
+      try {
+        const dataCounts = await fetchLiveCounts();
+        const countsArray = dataCounts || [0, 0, 0, 0];
+        if (cancelled) {
+          return;
+        }
+
+        const mappedCounts = {
+          north: Number(countsArray[0] || 0),
+          south: Number(countsArray[1] || 0),
+          east: Number(countsArray[2] || 0),
+          west: Number(countsArray[3] || 0),
+        };
+
+        console.log('STATE:', mappedCounts);
+        setBackendCounts(mappedCounts);
+      } catch (err) {
+        if (!cancelled) {
+          setBackendCounts({
+            north: 0,
+            south: 0,
+            east: 0,
+            west: 0
           });
-        } else {
-          lanesAfterCross[lane].push(vehicle);
         }
       }
+    };
+
+    syncLiveCounts();
+    const interval = setInterval(syncLiveCounts, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [mode]);
+
+  useEffect(() => {
+    console.log('CURRENT MODE:', mode);
+  }, [mode]);
+
+  function getActiveGreenLane(lightMap) {
+    for (const lane of LANE_ORDER) {
+      if (lightMap?.[lane] === 'green') return lane;
     }
-    updateVehiclePositions(lanesAfterCross);
-    decrementTimer(1);
-    incrementTick();
-    const newTime = timeRemainingRef.current - 1;
-    if (newTime <= 0) {
-      freezeSimulation();
-      tickingRef.current = false;
+    return null;
+  }
+
+  function getLaneCounts(laneMap) {
+    return {
+      north: laneMap.north.length,
+      east: laneMap.east.length,
+      south: laneMap.south.length,
+      west: laneMap.west.length
+    };
+  }
+
+  function getFallbackLane(currentLane, laneCounts) {
+    const sortedCandidates = LANE_ORDER
+      .filter((lane) => lane !== currentLane)
+      .sort((a, b) => laneCounts[b] - laneCounts[a]);
+
+    const busiestLane = sortedCandidates.find((lane) => laneCounts[lane] > 0);
+    if (busiestLane) return busiestLane;
+
+    const currentIndex = LANE_ORDER.indexOf(currentLane);
+    if (currentIndex === -1) return 'north';
+    return LANE_ORDER[(currentIndex + 1) % LANE_ORDER.length];
+  }
+
+  function applyLaneSwitch(newLane, simulatedTick, duration) {
+    const previousLane = currentGreenLaneRef.current;
+    if (!newLane || !previousLane || newLane === previousLane) return;
+
+    const phase = { lane: previousLane, duration };
+
+    setSignalPhases((prev) => [
+      ...prev,
+      phase
+    ]);
+    addSignalPhase(phase);
+    setCurrentGreenLane(newLane);
+    currentGreenLaneRef.current = newLane;
+    setPhaseStartTick(simulatedTick);
+    phaseStartTickRef.current = simulatedTick;
+    updateLightStates(newLane);
+  }
+
+  async function runTick() {
+    if (!tickingRef.current) return;
+
+    // In video mode, RL decisions are produced by the backend video pipeline.
+    // Skip frontend simulation ticks to avoid posting stale/empty local lane counts.
+    if (mode === 'video') {
+      return;
+    }
+
+    try {
+      if (timeRemainingRef.current <= 0) {
+        freezeSimulation();
+        tickingRef.current = false;
+        return;
+      }
+
+      const snapshot = buildLaneSnapshot(lanesRef.current);
+      const payload = {
+        ...snapshot,
+        timestamp: Date.now() / 1000,
+        active_green_lane: getActiveGreenLane(lightStatesRef.current)
+      };
+
+      const decision = await fetchRLDecision(payload);
+
+      const rlSuggestedLane = LANE_ORDER.includes(decision?.lane)
+        ? decision.lane
+        : 'north';
+
+      const simulatedTick = tickCountRef.current + 1;
+      let activeGreenLane = currentGreenLaneRef.current;
+
+      if (!activeGreenLane) {
+        activeGreenLane = getActiveGreenLane(lightStatesRef.current) || rlSuggestedLane;
+        setCurrentGreenLane(activeGreenLane);
+        currentGreenLaneRef.current = activeGreenLane;
+        setPhaseStartTick(simulatedTick);
+        phaseStartTickRef.current = simulatedTick;
+      }
+
+      setLastDecision(decision);
+      setDecisionDebugLogs((prev) => [
+        ...prev,
+        {
+          tick: simulatedTick,
+          lane: activeGreenLane,
+          duration: Number(decision?.duration ?? 0),
+          strategy: decision?.debug?.strategy || 'n/a'
+        }
+      ].slice(-25));
+
+      updateLightStates(activeGreenLane);
+
+      const updatedLanes = moveVehicles(lanesRef.current, {
+        north: activeGreenLane === 'north' ? 'green' : 'red',
+        south: activeGreenLane === 'south' ? 'green' : 'red',
+        east: activeGreenLane === 'east' ? 'green' : 'red',
+        west: activeGreenLane === 'west' ? 'green' : 'red'
+      });
+
+      const lanesAfterCross = { north: [], east: [], south: [], west: [] };
+      let removedVehiclesThisTick = 0;
+
+      for (const lane of LANE_ORDER) {
+        for (const vehicle of updatedLanes[lane]) {
+          if (lane !== activeGreenLane) {
+            lanesAfterCross[lane].push(vehicle);
+            continue;
+          }
+
+          const cross = checkVehicleCrossing(vehicle);
+
+          if (cross.crossed) {
+            removedVehiclesThisTick += 1;
+            logEvent({
+              eventType: 'vehicle_crossed',
+              vehicleId: vehicle.vehicleId,
+              vehicleType: vehicle.vehicleType,
+              laneId: vehicle.laneId,
+              timestamp: Date.now(),
+              payload: {}
+            });
+          } else {
+            lanesAfterCross[lane].push(vehicle);
+          }
+        }
+      }
+
+      updateVehiclePositions(lanesAfterCross);
+      if (removedVehiclesThisTick > 0) {
+        incrementTotalVehiclesCrossed(removedVehiclesThisTick);
+      }
+
+      const laneCounts = getLaneCounts(lanesAfterCross);
+      const allLanesEmpty = LANE_ORDER.every((lane) => laneCounts[lane] <= 1);
+      const vehicleCount = laneCounts[activeGreenLane] ?? 0;
+      const elapsedTime = Math.max(0, simulatedTick - phaseStartTickRef.current);
+      const totalVehiclesCrossedAfterTick = useSimulationStore.getState().totalVehiclesCrossed;
+
+      const canEarlyExit = elapsedTime >= MIN_SAFE_TIME && vehicleCount <= 1 && !allLanesEmpty;
+      const canNormalSwitch = elapsedTime >= NORMAL_SWITCH_TIME && rlSuggestedLane !== activeGreenLane;
+      const mustForceSwitch = elapsedTime >= MAX_GREEN_TIME;
+
+      let shouldSwitch = false;
+      let reason = '';
+      let newLane = activeGreenLane;
+
+      if (canEarlyExit) {
+        shouldSwitch = true;
+        reason = 'EARLY_EXIT';
+      } else if (canNormalSwitch) {
+        shouldSwitch = true;
+        reason = 'NORMAL_SWITCH';
+      } else if (mustForceSwitch) {
+        shouldSwitch = true;
+        reason = 'MAX_TIMEOUT';
+      }
+
+      if (shouldSwitch) {
+        if (rlSuggestedLane !== activeGreenLane) {
+          newLane = rlSuggestedLane;
+        } else {
+          newLane = getFallbackLane(activeGreenLane, laneCounts);
+        }
+
+        if (newLane !== activeGreenLane) {
+          const duration = elapsedTime;
+          if (sessionId && activeGreenLane) {
+            try {
+              await logSignalPhase(sessionId, activeGreenLane, duration);
+            } catch (error) {
+              console.warn('Failed to log signal phase:', error);
+            }
+          }
+          applyLaneSwitch(newLane, simulatedTick, duration);
+        }
+      }
+
+      decrementTimer(1);
+      incrementTick();
+
+      if (timeRemainingRef.current - 1 <= 0) {
+        freezeSimulation();
+        tickingRef.current = false;
+      }
+
+    } catch (err) {
     }
   }
 
   function handleStart() {
+    if (mode !== 'video') {
+      setMode('simulation');
+    }
     startSimulation();
+    setSignalPhases([]);
+    setSignalPhasesStore([]);
+    setDecisionDebugLogs([]);
+    setCurrentGreenLane(null);
+    setPhaseStartTick(0);
+    currentGreenLaneRef.current = null;
+    phaseStartTickRef.current = 0;
+    setTotalVehiclesCrossed(0);
     tickingRef.current = true;
   }
 
   useEffect(() => {
     let interval = null;
-    if (status === 'running') {
+
+    if (status === 'running' && mode !== 'video') {
       tickingRef.current = true;
-      interval = setInterval(() => {
-        if (tickingRef.current) runTick();
-      }, 1000);
+      interval = setInterval(runTick, 1000);
+    } else {
+      tickingRef.current = false;
     }
+
     return () => {
       if (interval) clearInterval(interval);
       tickingRef.current = false;
     };
-  }, [status]);
+  }, [status, mode]);
 
   useEffect(() => {
     if (status === 'completed') {
@@ -111,9 +380,9 @@ export default function SimulationPage() {
     }
   }, [status, navigate]);
 
-  // Handler for adding vehicle
   function handleAddVehicle(laneId, vehicleType) {
     const vehicleId = generateVehicleId(vehicleType, laneId);
+
     const vehicle = {
       vehicleId,
       vehicleType,
@@ -121,7 +390,7 @@ export default function SimulationPage() {
       spawnedAt: Date.now(),
       position: 0
     };
-    // Log vehicle_added event
+
     logEvent({
       eventType: 'vehicle_added',
       vehicleId,
@@ -130,247 +399,157 @@ export default function SimulationPage() {
       timestamp: vehicle.spawnedAt,
       payload: {}
     });
-    // Add vehicle to lane
+
     addVehicleToLane(vehicle, laneId);
-    // Debug lanesRef after vehicle added
-    console.log('Vehicle added, lanesRef:', JSON.stringify(lanesRef.current));
   }
 
-  // Lane card UI
   function LaneCard({ laneId }) {
     const isActive = lightStates[laneId] === 'green';
-    const cardStyle = {
-      background: 'rgba(18,24,38,0.95)',
-      borderRadius: 16,
-      boxShadow: isActive
-        ? '0 0 24px 6px #00ffae, 0 0 8px 2px #00ffe7 inset'
-        : '0 0 8px 2px #ff2d2d inset',
-      border: isActive
-        ? '2px solid #00ffae'
-        : '2px solid #ff2d2d',
-      animation: isActive ? 'pulseGreen 1.2s infinite' : 'none',
-      padding: 24,
-      margin: 16,
-      width: 260,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      fontFamily: 'Rajdhani, monospace',
-      position: 'relative',
-      transition: 'box-shadow 0.3s, border 0.3s',
-    };
-    const badgeStyle = {
-      fontFamily: 'Share Tech Mono, monospace',
-      fontSize: 18,
-      padding: '6px 18px',
-      borderRadius: 16,
-      background: isActive ? 'linear-gradient(90deg,#00ffae,#00ffe7)' : 'linear-gradient(90deg,#ff2d2d,#ff5c5c)',
-      color: '#0a0e1a',
-      fontWeight: 'bold',
-      boxShadow: isActive ? '0 0 12px 2px #00ffae' : '0 0 8px 2px #ff2d2d',
-      marginBottom: 8,
-      marginTop: 8,
-      letterSpacing: 2,
-      textShadow: isActive ? '0 0 8px #00ffe7' : '0 0 4px #ff2d2d',
-    };
-    const vehicleCountStyle = {
-      fontSize: 22,
-      color: '#00ffe7',
-      fontFamily: 'Share Tech Mono, monospace',
-      marginBottom: 8,
-      textShadow: '0 0 8px #00ffe7',
-    };
-    const laneNameStyle = {
-      fontFamily: 'Share Tech Mono, monospace',
-      fontSize: 24,
-      color: '#fff',
-      marginTop: 8,
-      letterSpacing: 2,
-      textShadow: '0 0 8px #00ffe7',
-    };
-    const iconButtonStyle = {
-      background: '#0a0e1a',
-      color: '#00ffe7',
-      border: '2px solid #00ffe7',
-      borderRadius: 8,
-      fontSize: 22,
-      padding: '8px 12px',
-      margin: '4px',
-      cursor: 'pointer',
-      boxShadow: '0 0 8px 2px #00ffe7',
-      transition: 'background 0.2s, color 0.2s',
-      fontFamily: 'Rajdhani, monospace',
-    };
-    const icons = {
-      car: '🚗',
-      bike: '🚲',
-      ambulance: '🚑',
-      truck: '🚚',
-      bus: '🚌',
-    };
+    const vehicles = lanes[laneId] || [];
+    const count = mode === 'video' ? Number(backendCounts[laneId] || 0) : vehicles.length;
+    console.log(`LANE ${laneId}:`, backendCounts[laneId]);
+
     return (
-      <div style={cardStyle}>
-        <span style={laneNameStyle}>{laneId.toUpperCase()}</span>
-        <span style={badgeStyle}>{isActive ? 'ACTIVE' : 'STOPPED'}</span>
-        <div style={vehicleCountStyle}>{(lanes[laneId] || []).length} Vehicles</div>
-        <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+      <Card className={`lane-card ${isActive ? 'lane-card-active' : ''}`}>
+        <div className="lane-card-header">
+          <h3>{laneId.toUpperCase()}</h3>
+          <span className={`lane-status ${isActive ? 'lane-status-active' : 'lane-status-stopped'}`}>
+            {isActive ? 'ACTIVE' : 'STOPPED'}
+          </span>
+        </div>
+
+        <p className="lane-count">{count} Vehicles</p>
+
+        <div className="lane-actions">
           {VEHICLE_TYPES.map(type => (
-            <button key={type} style={iconButtonStyle} onClick={() => handleAddVehicle(laneId, type)} title={type.charAt(0).toUpperCase() + type.slice(1)}>
-              {icons[type]}
+            <button
+              key={type}
+              className="vehicle-icon-btn"
+              onClick={() => handleAddVehicle(laneId, type)}
+            >
+              {VEHICLE_ICONS[type]}
             </button>
           ))}
         </div>
-      </div>
+      </Card>
     );
   }
 
-  // Google Fonts
-  if (typeof window !== 'undefined') {
-    const link1 = document.createElement('link');
-    link1.href = 'https://fonts.googleapis.com/css?family=Share+Tech+Mono:400&display=swap';
-    link1.rel = 'stylesheet';
-    document.head.appendChild(link1);
-    const link2 = document.createElement('link');
-    link2.href = 'https://fonts.googleapis.com/css?family=Rajdhani:400,700&display=swap';
-    link2.rel = 'stylesheet';
-    document.head.appendChild(link2);
-  }
+  const timerPercent = Math.max(0, Math.min(100, (timeRemaining / 60) * 100));
+  const activePhaseDuration = currentGreenLane ? Math.max(0, tickCount - phaseStartTick) : 0;
+  const displayedSignalPhases = currentGreenLane
+    ? [...signalPhases, { lane: currentGreenLane, duration: activePhaseDuration, active: true }]
+    : signalPhases;
 
-  // Glowing ring timer animation
-  const timerRingStyle = {
-    width: 180,
-    height: 180,
-    borderRadius: '50%',
-    border: '8px solid #00ffe7',
-    boxShadow: '0 0 32px 8px #00ffe7',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    margin: '0 auto',
-    marginBottom: 32,
-    position: 'relative',
-    animation: 'glowRing 1.5s infinite alternate',
-  };
-  const timerTextStyle = {
-    fontFamily: 'Share Tech Mono, monospace',
-    fontSize: 48,
-    color: '#00ffe7',
-    textShadow: '0 0 16px #00ffe7',
-    letterSpacing: 2,
-    fontWeight: 700,
-    position: 'absolute',
-    left: '50%',
-    top: '50%',
-    transform: 'translate(-50%, -50%)',
-  };
-  const gridStyle = {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gridTemplateRows: '1fr 1fr',
-    gap: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
-    margin: '0 auto',
-    maxWidth: 600,
-    marginBottom: 32,
-  };
-  const mainBgStyle = {
-    minHeight: '100vh',
-    background: '#0a0e1a',
-    backgroundImage: 'repeating-linear-gradient(135deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 20px)',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    padding: 0,
-    fontFamily: 'Rajdhani, monospace',
-  };
-  const headerStyle = {
-    fontFamily: 'Share Tech Mono, monospace',
-    fontSize: 36,
-    color: '#00ffe7',
-    textShadow: '0 0 16px #00ffe7',
-    marginTop: 32,
-    marginBottom: 24,
-    letterSpacing: 4,
-    fontWeight: 700,
-    textAlign: 'center',
-  };
-  const timerBarStyle = {
-  width: '80%',
-  height: 18,
-  background: 'linear-gradient(90deg,#00ffae,#00ffe7)',
-  borderRadius: 12,
-  margin: '32px auto',
-  boxShadow: '0 0 16px #00ffe7',
-  overflow: 'hidden',
-};
-  const timerBarFillStyle = {
-    height: '100%',
-    background: '#0a0e1a',
-    borderRadius: 12,
-    transition: 'width 0.5s',
-    width: `${Math.max(0, Math.min(100, (timeRemaining / 60) * 100))}%`,
-  };
-
-  // Keyframes for glowing ring and lane pulse
-  const styleSheet = document.createElement('style');
-  styleSheet.innerHTML = `
-    @keyframes glowRing {
-      0% { box-shadow: 0 0 32px 8px #00ffe7; }
-      100% { box-shadow: 0 0 64px 16px #00ffe7; }
-    }
-    @keyframes pulseGreen {
-      0% { box-shadow: 0 0 24px 6px #00ffae, 0 0 8px 2px #00ffe7 inset; }
-      50% { box-shadow: 0 0 48px 12px #00ffae, 0 0 16px 4px #00ffe7 inset; }
-      100% { box-shadow: 0 0 24px 6px #00ffae, 0 0 8px 2px #00ffe7 inset; }
-    }
-  `;
-  if (typeof window !== 'undefined' && !document.head.querySelector('style[data-simpage]')) {
-    styleSheet.setAttribute('data-simpage', 'true');
-    document.head.appendChild(styleSheet);
-  }
+  useEffect(() => {
+    setSignalPhasesStore(
+      displayedSignalPhases.map(({ active, ...phase }) => phase)
+    );
+  }, [displayedSignalPhases, setSignalPhasesStore]);
 
   return (
-    <div style={mainBgStyle}>
-      <div style={headerStyle}>Traffic Control System</div>
-      {(status === 'setup' || status === 'placement' || status === 'running') && (
-        <div style={timerRingStyle}>
-          <span style={timerTextStyle}>{timeRemaining}</span>
-        </div>
-      )}
-      <div style={gridStyle}>
-        {LANE_ORDER.map(laneId => (
-          <LaneCard key={laneId} laneId={laneId} />
-        ))}
-      </div>
-      <div style={timerBarStyle}>
-        <div style={timerBarFillStyle}></div>
-      </div>
-      {status === 'setup' && <TimerControl />}
-      {status === 'placement' && (
-        <button
-          style={{
-            fontFamily: 'Share Tech Mono, monospace',
-            fontSize: 22,
-            color: '#00ffe7',
-            background: '#0a0e1a',
-            border: '2px solid #00ffe7',
-            borderRadius: 12,
-            padding: '12px 32px',
-            marginTop: 24,
-            marginBottom: 16,
-            boxShadow: '0 0 16px #00ffe7',
-            cursor: 'pointer',
-            letterSpacing: 2,
-            textShadow: '0 0 8px #00ffe7',
-            transition: 'background 0.2s, color 0.2s',
-          }}
-          onClick={handleStart}
-        >
-          Start Simulation
-        </button>
-      )}
+    <div className="dashboard">
+      <AppSidebar />
+
+      <main className="content">
+        <header className="content-header">
+          <h1>Traffic Control Simulation</h1>
+          <p>Manage lane vehicles and monitor live RL decisions</p>
+        </header>
+
+        <Section className="simulation-topbar">
+          <div className="timer-chip">
+            <span>Time Remaining</span>
+            <strong>{timeRemaining}s</strong>
+          </div>
+
+          <Button variant="secondary" onClick={() => navigate('/upload')}>
+            Upload Video
+          </Button>
+        </Section>
+
+        <Section title="Simulation Progress">
+          <progress className="progress-bar" value={timerPercent} max={100} />
+        </Section>
+
+        <section className="lane-grid">
+          {LANE_ORDER.map(laneId => (
+            <LaneCard key={laneId} laneId={laneId} />
+          ))}
+        </section>
+
+        <Section title="Actual Signal Durations (Simulation)">
+          {displayedSignalPhases.length === 0 ? (
+            <p className="muted-text">No signal phases recorded yet.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="decision-table">
+                <thead>
+                  <tr>
+                    <th>Lane</th>
+                    <th className="align-right">Actual Duration (s)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayedSignalPhases.map((phase, index) => (
+                    <tr key={`${phase.lane}-${index}`}>
+                      <td>{String(phase.lane || '--').toUpperCase()}</td>
+                      <td className="align-right">
+                        {Number(phase.duration || 0).toFixed(1)}
+                        {phase.active ? ' (active)' : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+        {status === 'running' && lastDecision && (
+          <Section title="Debug Panel (Simulation Only)">
+            <p><strong>Lane:</strong> {lastDecision.lane}</p>
+            <p><strong>Duration:</strong> {lastDecision.duration ?? '--'}s</p>
+            <p><strong>Strategy:</strong> {lastDecision?.debug?.strategy}</p>
+            {decisionDebugLogs.length > 0 && (
+              <div className="table-wrap">
+                <table className="decision-table">
+                  <thead>
+                    <tr>
+                      <th className="align-right">Tick</th>
+                      <th>Lane</th>
+                      <th className="align-right">Duration (s)</th>
+                      <th>Strategy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...decisionDebugLogs].reverse().map((log, idx) => (
+                      <tr key={`${log.tick}-${idx}`}>
+                        <td className="align-right">{log.tick}</td>
+                        <td>{String(log.lane || '--').toUpperCase()}</td>
+                        <td className="align-right">{Number(log.duration || 0).toFixed(1)}</td>
+                        <td>{log.strategy}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Section>
+        )}
+
+        {status === 'setup' && (
+          <Section title="Setup Timer">
+            <TimerControl />
+          </Section>
+        )}
+
+        {status === 'placement' && (
+          <Section>
+            <Button onClick={handleStart}>Start Simulation</Button>
+          </Section>
+        )}
+      </main>
     </div>
   );
 }

@@ -2,6 +2,8 @@ from fastapi import FastAPI  # FastAPI app
 from fastapi.middleware.cors import CORSMiddleware  # CORS middleware
 from backend.routers.simulation import router as simulation_router  # Simulation router
 from backend.routers.rl import router as rl_router  # RL router
+from backend.routers.upload import router as upload_router  # Upload router
+from backend.routers.jobs import router as jobs_router  # Jobs router
 from backend.database.models import create_tables  # DB table setup
 
 app = FastAPI()  # Create FastAPI app
@@ -23,3 +25,5 @@ def startup_event():
 # Mount simulation router
 app.include_router(simulation_router)
 app.include_router(rl_router)
+app.include_router(upload_router)
+app.include_router(jobs_router)

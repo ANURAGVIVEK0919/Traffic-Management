@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { fetchSimulationResults } from '../services/api';
 import { determineWinner } from '../utils/dashboardUtils';
-import MetricCard from '../components/dashboard/MetricCard';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend } from 'recharts';
-import { useParams } from 'react-router-dom';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, CartesianGrid, ResponsiveContainer } from 'recharts';
+import { useLocation, useParams } from 'react-router-dom';
+import AppSidebar from '../components/layout/AppSidebar';
+import Card from '../components/ui/Card';
+import Section from '../components/ui/Section';
+import './dashboard.css';
 
-// DashboardPage component
 export default function DashboardPage() {
-  // Metrics to compare
   const METRICS = [
     { key: 'avg_wait_time', label: 'Average Wait Time (s)' },
     { key: 'total_vehicles_crossed', label: 'Total Vehicles Crossed' },
@@ -16,196 +17,255 @@ export default function DashboardPage() {
     { key: 'ambulance_avg_wait_time', label: 'Ambulance Wait Time (s)' }
   ];
 
-  // Get sessionId from route params
-  const { sessionId } = useParams();
-
-  // Local state for results and error
+  const params = useParams();
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search || '');
+  const rlSessionId = searchParams.get('rl_id') || null;
+  const staticSessionId = searchParams.get('static_id') || null;
+  const sessionId = params.sessionId || params.id || null;
+  const effectiveSessionId = rlSessionId || sessionId;
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+  const [statusMessage, setStatusMessage] = useState('Loading results...');
 
-  // Fetch results on mount
   useEffect(() => {
+    if (!effectiveSessionId) {
+      setError('Missing session id');
+      return;
+    }
+
+    async function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     async function fetchResults() {
-      try {
-        const res = await fetchSimulationResults(sessionId);
-        if (res.error) {
-          setError(res.error);
-        } else {
-          setResults(res);
+      setError(null);
+      setStatusMessage('Finalizing results...');
+
+      let resultsReady = false;
+
+      for (let attempt = 1; attempt <= 10; attempt += 1) {
+        try {
+          const res = rlSessionId && staticSessionId
+            ? await fetchSimulationResults({ rlId: rlSessionId, staticId: staticSessionId })
+            : await fetchSimulationResults(effectiveSessionId);
+          if (res && !res.error) {
+            console.log('API RESULT:', res);
+            console.log('API RESULT dynamic.total_vehicles_crossed:', res?.dynamic?.total_vehicles_crossed);
+            console.log('API RESULT static.total_vehicles_crossed:', res?.static?.total_vehicles_crossed);
+            console.log('DASHBOARD SESSION IDS:', {
+              effectiveSessionId,
+              rlSessionId,
+              staticSessionId,
+              routeId: params?.id || null
+            });
+            setResults(res);
+            resultsReady = true;
+            break;
+          }
+        } catch (err) {
+          console.warn('Results not ready yet:', err);
         }
-      } catch (err) {
-        setError('Failed to fetch results');
+
+        if (attempt < 10) {
+          await sleep(1000);
+        }
+      }
+
+      if (!resultsReady) {
+        setError('Results not ready, please retry');
+        setStatusMessage('Loading results...');
+        return;
       }
     }
     fetchResults();
-  }, [sessionId]);
+  }, [effectiveSessionId, rlSessionId, staticSessionId]);
 
-  // Show error if present
   if (error) {
-    return <p>Error: {error}</p>;
+    return (
+      <div className="dashboard">
+        <AppSidebar />
+        <main className="content">
+          <div className="status-banner status-warning">Error: {error}</div>
+        </main>
+      </div>
+    );
   }
 
-  // Show loading if results not loaded
   if (!results) {
-    return <p>Loading results...</p>;
+    return (
+      <div className="dashboard">
+        <AppSidebar />
+        <main className="content">
+          <header className="content-header">
+            <h1>Simulation Comparison Dashboard</h1>
+            <p>{statusMessage}</p>
+          </header>
+          <section className="kpi-grid">
+            {Array.from({ length: 4 }).map((_, idx) => (
+              <Card key={`loading-kpi-${idx}`} className="kpi-card skeleton-card">
+                <div className="skeleton-line skeleton-line-short" />
+                <div className="skeleton-line skeleton-line-wide" />
+              </Card>
+            ))}
+          </section>
+          <Section>
+            <div className="skeleton-line skeleton-line-short" />
+            <div className="skeleton-block" />
+          </Section>
+        </main>
+      </div>
+    );
   }
 
-  // Prepare chart data
   const chartData = METRICS.map(metric => ({
     metric: metric.label,
     Dynamic: results.dynamic[metric.key] ?? null,
     Static: results.static[metric.key] ?? null
   }));
+  const wins = results?.benchmark?.wins || { dynamic: 0, static: 0, tie: 0, 'n/a': 0 };
+  const uplift = results?.benchmark?.uplift || {};
+  const chartHasData = chartData.some((item) => item.Dynamic !== null || item.Static !== null);
+  const signalLog = Array.isArray(results?.actual_signal_log) ? results.actual_signal_log : [];
 
-  // Google Fonts
-  if (typeof window !== 'undefined') {
-    const link1 = document.createElement('link');
-    link1.href = 'https://fonts.googleapis.com/css?family=Share+Tech+Mono:400&display=swap';
-    link1.rel = 'stylesheet';
-    document.head.appendChild(link1);
-    const link2 = document.createElement('link');
-    link2.href = 'https://fonts.googleapis.com/css?family=Rajdhani:400,700&display=swap';
-    link2.rel = 'stylesheet';
-    document.head.appendChild(link2);
-  }
-
-  // Styles
-  const mainBgStyle = {
-    minHeight: '100vh',
-    background: '#0a0e1a',
-    fontFamily: 'Rajdhani, monospace',
-    padding: 0,
-    margin: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-  };
-  const titleStyle = {
-    fontFamily: 'Share Tech Mono, monospace',
-    fontSize: 36,
-    color: '#00f5d4',
-    textShadow: '0 0 16px #00f5d4',
-    marginTop: 32,
-    marginBottom: 24,
-    letterSpacing: 4,
-    fontWeight: 700,
-    textAlign: 'center',
-    borderBottom: '4px solid #00f5d4',
-    boxShadow: '0 4px 16px -4px #00f5d4',
-    paddingBottom: 8,
-    width: 600,
-    background: 'transparent',
-  };
-  const tableStyle = {
-    width: 600,
-    borderCollapse: 'collapse',
-    margin: '0 auto',
-    fontFamily: 'Rajdhani, monospace',
-    fontSize: 20,
-    background: 'transparent',
-    boxShadow: '0 0 24px 4px #0f1628',
-    marginBottom: 32,
-  };
-  const thStyle = {
-    background: '#1a2035',
-    color: '#fff',
-    fontFamily: 'Share Tech Mono, monospace',
-    fontSize: 22,
-    padding: '16px 12px',
-    borderLeft: '4px solid #00f5d4',
-    borderBottom: '2px solid #0f1628',
-    textAlign: 'center',
-    letterSpacing: 2,
-  };
-  const rowStyles = [
-    { background: '#0f1628' },
-    { background: '#0a0e1a' }
+  const kpiCards = [
+    {
+      key: 'avg_wait_time',
+      label: 'Average Wait Time',
+      value: typeof results?.dynamic?.avg_wait_time === 'number' ? `${results.dynamic.avg_wait_time.toFixed(2)}s` : '--'
+    },
+    {
+      key: 'total_vehicles_crossed',
+      label: 'Vehicles Crossed',
+      value: typeof results?.dynamic?.total_vehicles_crossed === 'number' ? results.dynamic.total_vehicles_crossed.toFixed(0) : '--'
+    },
+    {
+      key: 'avg_green_utilization',
+      label: 'Green Utilization',
+      value: typeof results?.dynamic?.avg_green_utilization === 'number' ? `${results.dynamic.avg_green_utilization.toFixed(2)}%` : '--'
+    },
+    {
+      key: 'ambulance_avg_wait_time',
+      label: 'Ambulance Wait',
+      value: typeof results?.dynamic?.ambulance_avg_wait_time === 'number' ? `${results.dynamic.ambulance_avg_wait_time.toFixed(2)}s` : '--'
+    }
   ];
-  const tdStyle = {
-    padding: '14px 12px',
-    textAlign: 'center',
-    fontFamily: 'Rajdhani, monospace',
-    fontSize: 20,
-    color: '#fff',
-    borderBottom: '1px solid #1a2035',
-  };
-  const cyanStyle = { color: '#00f5d4', fontWeight: 700 };
-  const orangeStyle = { color: '#f97316', fontWeight: 700 };
-  const pillStyle = {
-    display: 'inline-block',
-    padding: '6px 18px',
-    borderRadius: 16,
-    fontSize: 18,
-    fontFamily: 'Share Tech Mono, monospace',
-    fontWeight: 700,
-    letterSpacing: 2,
-    margin: '0 auto',
-    boxShadow: '0 0 8px 2px #00f5d4',
-    textAlign: 'center',
-  };
-  const winnerStyles = {
-    dynamic: { ...pillStyle, background: '#00f5d4', color: '#0a0e1a' },
-    static: { ...pillStyle, background: '#f97316', color: '#0a0e1a' },
-    tie: { ...pillStyle, background: '#444', color: '#fff', boxShadow: 'none' },
-    'n/a': { ...pillStyle, background: '#222', color: '#fff', boxShadow: 'none' },
-  };
-
-  // Keyframes for glowing border
-  const styleSheet = document.createElement('style');
-  styleSheet.innerHTML = `
-    .dashboard-table th { border-left: 4px solid #00f5d4; }
-    .dashboard-table tr:nth-child(even) { background: #0a0e1a; }
-    .dashboard-table tr:nth-child(odd) { background: #0f1628; }
-  `;
-  if (typeof window !== 'undefined' && !document.head.querySelector('style[data-dashboard]')) {
-    styleSheet.setAttribute('data-dashboard', 'true');
-    document.head.appendChild(styleSheet);
-  }
 
   return (
-    <div style={mainBgStyle}>
-      <div style={titleStyle}>Simulation Comparison Dashboard</div>
-      <table style={tableStyle} className="dashboard-table">
-        <thead>
-          <tr>
-            <th style={thStyle}>Metric</th>
-            <th style={thStyle}>Dynamic (RL)</th>
-            <th style={thStyle}>Static</th>
-            <th style={thStyle}>Winner</th>
-          </tr>
-        </thead>
-        <tbody>
-          {METRICS.map((metric, idx) => {
-            const dynamicValue = results.dynamic[metric.key] ?? null;
-            const staticValue = results.static[metric.key] ?? null;
-            const { winner } = determineWinner(metric.key, dynamicValue, staticValue);
-            const winnerLabel =
-              winner === 'dynamic' ? 'RL Wins 🏆' :
-              winner === 'static' ? 'Static Wins' :
-              winner === 'tie' ? 'Tie' : 'N/A';
-            const winnerStyle = winnerStyles[winner] || winnerStyles['n/a'];
-            return (
-              <tr key={metric.key} style={rowStyles[idx % 2]}>
-                <td style={tdStyle}>{metric.label}</td>
-                <td style={{ ...tdStyle, ...cyanStyle }}>{dynamicValue !== null ? dynamicValue.toFixed(2) : '--'}</td>
-                <td style={{ ...tdStyle, ...orangeStyle }}>{staticValue !== null ? staticValue.toFixed(2) : '--'}</td>
-                <td style={winnerStyle}>{winnerLabel}</td>
+    <div className="dashboard">
+      <AppSidebar />
+
+      <main className="content">
+        <header className="content-header">
+          <h1>Simulation Comparison Dashboard</h1>
+          <p>Compare RL and static traffic control performance with session-level diagnostics.</p>
+        </header>
+
+        <section className="kpi-grid">
+          {kpiCards.map((item) => (
+            <Card key={item.label} className="kpi-card">
+              <p>{item.label}</p>
+              <h2>{item.value}</h2>
+              <div className={`kpi-trend ${typeof uplift?.[item.key]?.uplift_pct === 'number' && uplift[item.key].uplift_pct < 0 ? 'kpi-trend-down' : 'kpi-trend-up'}`}>
+                {typeof uplift?.[item.key]?.uplift_pct === 'number'
+                  ? `${uplift[item.key].uplift_pct >= 0 ? '↑' : '↓'} ${Math.abs(uplift[item.key].uplift_pct).toFixed(2)}%`
+                  : 'No trend data'}
+              </div>
+            </Card>
+          ))}
+        </section>
+
+        <Section
+          title="Performance Comparison"
+          actions={(
+            <div className="benchmark-summary">
+              <span>RL Wins: {wins.dynamic}</span>
+              <span>Static Wins: {wins.static}</span>
+              <span>Ties: {wins.tie}</span>
+            </div>
+          )}
+        >
+          <table className="metrics-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th className="align-right">Dynamic (RL)</th>
+                <th className="align-right">Static</th>
+                <th>Winner</th>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div style={{ width: 600, background: '#0a0e1a', padding: '24px 0', borderRadius: 16, marginBottom: 48, boxShadow: '0 0 24px 4px #00f5d4' }}>
-        <BarChart width={560} height={300} data={chartData} style={{ background: '#0a0e1a' }}>
-          <XAxis dataKey="metric" stroke="#fff" style={{ fontFamily: 'Rajdhani, monospace', fontSize: 18 }} />
-          <YAxis stroke="#fff" style={{ fontFamily: 'Rajdhani, monospace', fontSize: 18 }} />
-          <Tooltip contentStyle={{ background: '#1a2035', color: '#fff', fontFamily: 'Rajdhani, monospace' }} />
-          <Legend wrapperStyle={{ color: '#fff', fontFamily: 'Rajdhani, monospace', fontSize: 18 }} />
-          <Bar dataKey="Dynamic" fill="#00f5d4" radius={[8,8,0,0]} />
-          <Bar dataKey="Static" fill="#f97316" radius={[8,8,0,0]} />
-        </BarChart>
-      </div>
+            </thead>
+            <tbody>
+              {METRICS.map((metric) => {
+                const dynamicValue = results.dynamic[metric.key] ?? null;
+                const staticValue = results.static[metric.key] ?? null;
+                const { winner } = determineWinner(metric.key, dynamicValue, staticValue);
+                const winnerLabel = winner === 'dynamic' ? 'RL Wins' : winner === 'static' ? 'Static Wins' : winner === 'tie' ? 'Tie' : 'N/A';
+                const winnerClass = winner === 'n/a' ? 'na' : (winner || 'na');
+                const upliftPct = uplift?.[metric.key]?.uplift_pct;
+                const upliftText = typeof upliftPct === 'number' ? `${upliftPct >= 0 ? '+' : ''}${upliftPct.toFixed(2)}%` : 'N/A';
+                return (
+                  <tr key={metric.key}>
+                    <td>{metric.label}</td>
+                    <td className="metric-dynamic align-right">{dynamicValue !== null ? dynamicValue.toFixed(2) : '--'}</td>
+                    <td className="metric-static align-right">{staticValue !== null ? staticValue.toFixed(2) : '--'}</td>
+                    <td>
+                      <span className={`winner-pill winner-${winnerClass}`}>
+                        {winnerLabel} ({upliftText})
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Section>
+
+        <Section title="Benchmark Metrics">
+          <div className="chart-wrap chart-wrap-large">
+            {chartHasData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="metric" stroke="var(--muted)" />
+                  <YAxis stroke="var(--muted)" />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="Dynamic" fill="var(--primary)" radius={[8, 8, 0, 0]} />
+                  <Bar dataKey="Static" fill="var(--muted)" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="empty-state">No data available</div>
+            )}
+          </div>
+        </Section>
+
+        <Section title="Actual Signal Durations">
+          {signalLog.length === 0 ? (
+            <p className="muted-text">No actual signal duration data available for this session.</p>
+          ) : (
+            <div className="table-wrap">
+              <table className="decision-table">
+                <thead>
+                  <tr>
+                    <th>Lane</th>
+                    <th className="align-right">Duration (s)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {signalLog.map((item, index) => (
+                    <tr key={index}>
+                      <td>{String(item.lane).toUpperCase()}</td>
+                      <td className="align-right">{Number(item.duration).toFixed(1)}s</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+      </main>
     </div>
   );
 }

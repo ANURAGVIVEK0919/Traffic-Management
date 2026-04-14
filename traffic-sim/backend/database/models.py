@@ -43,5 +43,24 @@ def create_tables():
 			FOREIGN KEY (session_id) REFERENCES simulation_session(id)
 		)
 	""")
+	# Table 4: simulation_decision_log
+	cursor.execute("""
+		CREATE TABLE IF NOT EXISTS simulation_decision_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			tick_number INTEGER,
+			timestamp REAL NOT NULL,
+			selected_lane TEXT NOT NULL,
+			duration INTEGER,
+			strategy TEXT,
+			snapshot TEXT,
+			decision_debug TEXT,
+			FOREIGN KEY (session_id) REFERENCES simulation_session(id)
+		)
+	""")
+	cursor.execute("""
+		CREATE INDEX IF NOT EXISTS idx_simulation_decision_log_session
+		ON simulation_decision_log (session_id)
+	""")
 	conn.commit()
 	conn.close()

@@ -1,7 +1,12 @@
 
 # Parse event log for vehicle events (support camelCase and snake_case keys)
 def parse_event_log(events):
-	filtered = [e for e in events if (e.get('event_type') in ('vehicle_added', 'vehicle_crossed') or e.get('eventType') in ('vehicle_added', 'vehicle_crossed'))]
+	filtered = []
+	for event in events or []:
+		if not isinstance(event, dict):
+			continue
+		if event.get('event_type') in ('vehicle_added', 'vehicle_crossed') or event.get('eventType') in ('vehicle_added', 'vehicle_crossed'):
+			filtered.append(event)
 	result = []
 	for event in filtered:
 		# Support both camelCase and snake_case keys
@@ -9,7 +14,7 @@ def parse_event_log(events):
 		vehicle_type = event.get('vehicle_type') or event.get('vehicleType')
 		lane_id = event.get('lane_id') or event.get('laneId')
 		event_type = event.get('event_type') or event.get('eventType')
-		timestamp = event.get('timestamp')
+		timestamp = event.get('timestamp', 0)
 		result.append({
 			'vehicleId': vehicle_id,
 			'vehicleType': vehicle_type,

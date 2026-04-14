@@ -28,6 +28,7 @@ export default function TimerControl() {
 		const seconds = Number(inputValue) * 60
 		setTimer(seconds)
 		const result = await createSession(seconds)
+		console.log('FRONTEND session_id:', result.session_id)
 		setSessionId(result.session_id)
 	}
 
