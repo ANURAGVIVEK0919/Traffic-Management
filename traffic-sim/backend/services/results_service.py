@@ -1,6 +1,6 @@
 from backend.database.db import get_connection  # DB connection
 import json
-from backend.services.static_replay_service import compute_static_metrics, compute_ambulance_wait_time_from_decisions
+from backend.services.static_replay_service import compute_static_metrics, compute_dynamic_metrics, compute_ambulance_wait_time_from_decisions
 
 
 results_store = {}
@@ -333,13 +333,15 @@ def get_simulation_results(session_id):
     if not session_id:
         return {"error": "Results not found"}
 
-    # Always prefer live snapshot aggregation for dashboard reads.
-    live_metrics = _aggregate_live_snapshot_metrics(session_id)
-    if live_metrics is not None:
-        dynamic_result = _safe_result(live_metrics)
-        events = get_events_for_session(session_id)
+    events = get_events_for_session(session_id)
+    if events:
+        # Pass timer_duration as None, function will infer it from timestamps
+        dynamic_metrics = compute_dynamic_metrics(events, None)
+        dynamic_result = _safe_result(dynamic_metrics)
+        
         static_metrics = compute_static_metrics(events)
         static_result = _safe_result(static_metrics)
+        
         return {
             'dynamic': dynamic_result,
             'static': static_result,

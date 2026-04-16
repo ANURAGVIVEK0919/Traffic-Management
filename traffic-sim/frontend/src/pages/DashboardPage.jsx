@@ -158,7 +158,7 @@ export default function DashboardPage() {
       <main className="content">
         <header className="content-header">
           <h1>Simulation Comparison Dashboard</h1>
-          <p>Compare RL and static traffic control performance with session-level diagnostics.</p>
+          <p>Compare Adaptive Traffic Management and static traffic control performance with session-level diagnostics.</p>
         </header>
 
         <section className="kpi-grid">
@@ -179,7 +179,7 @@ export default function DashboardPage() {
           title="Performance Comparison"
           actions={(
             <div className="benchmark-summary">
-              <span>RL Wins: {wins.dynamic}</span>
+              <span>Adaptive Wins: {wins.dynamic}</span>
               <span>Static Wins: {wins.static}</span>
               <span>Ties: {wins.tie}</span>
             </div>
@@ -189,7 +189,7 @@ export default function DashboardPage() {
             <thead>
               <tr>
                 <th>Metric</th>
-                <th className="align-right">Dynamic (RL)</th>
+                <th className="align-right">Dynamic (Adaptive)</th>
                 <th className="align-right">Static</th>
                 <th>Winner</th>
               </tr>
@@ -199,7 +199,7 @@ export default function DashboardPage() {
                 const dynamicValue = results.dynamic[metric.key] ?? null;
                 const staticValue = results.static[metric.key] ?? null;
                 const { winner } = determineWinner(metric.key, dynamicValue, staticValue);
-                const winnerLabel = winner === 'dynamic' ? 'RL Wins' : winner === 'static' ? 'Static Wins' : winner === 'tie' ? 'Tie' : 'N/A';
+                const winnerLabel = winner === 'dynamic' ? 'Adaptive Wins' : winner === 'static' ? 'Static Wins' : winner === 'tie' ? 'Tie' : 'N/A';
                 const winnerClass = winner === 'n/a' ? 'na' : (winner || 'na');
                 const upliftPct = uplift?.[metric.key]?.uplift_pct;
                 const upliftText = typeof upliftPct === 'number' ? `${upliftPct >= 0 ? '+' : ''}${upliftPct.toFixed(2)}%` : 'N/A';

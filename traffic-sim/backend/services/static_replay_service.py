@@ -7,9 +7,9 @@ from backend.utils.metrics import (
 	compute_ambulance_wait_time
 )
 
-STATIC_GREEN_DURATION = 15  # seconds per lane
-CYCLE_DURATION = 60  # full cycle
-LANE_ORDER = ['north', 'east', 'south', 'west']
+STATIC_GREEN_DURATION = 30  # seconds per lane
+CYCLE_DURATION = 120  # full cycle
+LANE_ORDER = ['north', 'west', 'south', 'east']
 DIRECTIONS = ('north', 'south', 'east', 'west')
 
 
@@ -26,23 +26,18 @@ def _vehicle_crossed_events(events):
 	print("FIRST 3 EVENTS:", (events or [])[:3])
 	return vehicle_crossed_events
 
-# Compute wait time for a vehicle in static replay
-def compute_vehicle_wait_time(vehicle, lane, timer_duration, sim_start=0):
-	if not lane or lane not in LANE_ORDER:
-		return 0.0
-	arrived = vehicle.get('arrivedAt', 0) - sim_start  # normalize to 0-based
-	lane_index = LANE_ORDER.index(lane)
-	# Find first green start time >= arrivedAt
-	cycles = int(timer_duration / CYCLE_DURATION) + 1
-	green_start = None
-	for cycle in range(cycles):
-		start = cycle * CYCLE_DURATION + lane_index * STATIC_GREEN_DURATION
-		if start >= arrived:
-			green_start = start
-			break
-	if green_start is None:
-		green_start = timer_duration
-	return max(0.0, green_start - arrived)
+def get_next_green_second(current_time, lane_index):
+	cycle_time = current_time % CYCLE_DURATION
+	green_start = lane_index * STATIC_GREEN_DURATION
+	green_end = green_start + STATIC_GREEN_DURATION
+	
+	if green_start <= cycle_time < green_end:
+		return current_time
+	
+	if cycle_time < green_start:
+		return current_time + (green_start - cycle_time)
+	else:
+		return current_time + (CYCLE_DURATION - cycle_time) + green_start
 
 
 def _safe_average(total, count):
@@ -178,32 +173,73 @@ def compute_ambulance_wait_time_from_decisions(events):
 		return None
 	return float(total_wait / total_ambulance_observations)
 
+BASE_CROSSING_TIME = {
+	"car": 1.8,
+	"bike": 1.2,
+	"ambulance": 1.5,
+	"truck": 3.0,
+	"bus": 2.5,
+	"default": 1.8
+}
+
+def get_crossing_time(vehicle_index, vehicle_type):
+	base_time = BASE_CROSSING_TIME.get(str(vehicle_type).lower() if vehicle_type else "default", BASE_CROSSING_TIME["default"])
+
+	# Startup delay (first few vehicles slower)
+	if vehicle_index == 0:
+		return base_time + 1.0   # reaction + acceleration
+	elif vehicle_index == 1:
+		return base_time + 0.7
+	elif vehicle_index == 2:
+		return base_time + 0.4
+	else:
+		return base_time         # steady flow
+
 # Run static replay and compute wait times
 def run_static_replay(events, timer_duration):
 	parsed = parse_event_log(events)
 	timeline = reconstruct_vehicle_timeline(parsed)
-	print('Static timeline:', timeline)
 	all_vehicles = [v for lane in (timeline or {}).values() for v in (lane or []) if isinstance(v, dict)]
 	if not all_vehicles:
 		return {'timeline': timeline, 'wait_time_records': [], 'timer_duration': timer_duration}
 	sim_start = min(float(v.get('arrivedAt', 0.0) or 0.0) for v in all_vehicles)
+	
 	wait_time_records = []
 	for lane_id, vehicles in timeline.items():
-		for v in (vehicles or []):
-			if not isinstance(v, dict):
-				print(f"[STATIC REPLAY WARNING] skipping invalid vehicle record: {v}")
-				continue
-			wait_time = compute_vehicle_wait_time(v, lane_id, timer_duration, sim_start)
-			arrived_at = float(v.get('arrivedAt', 0.0) or 0.0) - sim_start
-			if arrived_at < 0:
-				arrived_at = 0.0
+		if lane_id not in LANE_ORDER:
+			continue
+		lane_index = LANE_ORDER.index(lane_id)
+		
+		# Sort vehicles to process them chronologically
+		valid_vehicles = [v for v in vehicles if isinstance(v, dict)]
+		valid_vehicles.sort(key=lambda x: float(x.get('arrivedAt', 0.0) or 0.0))
+		
+		lane_crossing_time = 0.0
+		for vehicle_index, v in enumerate(valid_vehicles):
+			arrived_at_ms = float(v.get('arrivedAt', 0.0) or 0.0) - sim_start
+			if arrived_at_ms < 0:
+				arrived_at_ms = 0.0
+			
+			arrived_at = arrived_at_ms / 1000.0
+			
+			# Car waits until it arrives OR until the car in front of it finishes crossing
+			earliest_possible = max(arrived_at, lane_crossing_time)
+			
+			# Get the true time the light is green for this car
+			actual_cross_time = get_next_green_second(earliest_possible, lane_index)
+			
+			wait_time = actual_cross_time - arrived_at
+			
 			wait_time_records.append({
 				'vehicleType': v.get('vehicleType'),
 				'waitTime': wait_time,
 				'laneId': lane_id,
 				'arrivedAt': arrived_at,
 			})
-	print('Static wait_time_records:', wait_time_records)
+			
+			# Block the lane realistically using startup delay and vehicle type
+			lane_crossing_time = actual_cross_time + get_crossing_time(vehicle_index, v.get('vehicleType'))
+
 	return {
 		'timeline': timeline,
 		'wait_time_records': wait_time_records,
@@ -250,7 +286,11 @@ def compute_dynamic_metrics_from_rl_decisions(events, timer_duration):
 	}
 
 
-def compute_dynamic_metrics(events, timer_duration):
+def compute_dynamic_metrics(events, timer_duration=None):
+	if timer_duration is None:
+		timestamps = [float((event or {}).get('timestamp', 0) or 0) for event in (events or []) if isinstance(event, dict)]
+		timer_duration = (max(timestamps) / 1000.0) if timestamps else 0.0
+
 	parsed = parse_event_log(events)
 	timeline = reconstruct_vehicle_timeline(parsed)
 	snapshot_aggregated = _aggregate_snapshot_wait_queue(events)
@@ -304,17 +344,28 @@ def compute_dynamic_metrics(events, timer_duration):
 			'waitTime': wait_time,
 			'laneId': lane_id
 		})
+
+	# Include stranded vehicles (those that spawned but never crossed) capped at the end of the simulation
+	max_ts = max((float(e.get('timestamp', 0) or 0) for e in parsed if isinstance(e, dict) and e.get('timestamp')), default=None)
+	if max_ts is None:
+		import time
+		max_ts = time.time() * 1000
+
+	crossed_vids = set(c.get('vehicleId') for c in crosses if isinstance(c, dict) and c.get('vehicleId'))
+	for vid, arrival in arrivals.items():
+		if vid not in crossed_vids:
+			arrival_ts = arrival.get('timestamp')
+			if arrival_ts and max_ts > arrival_ts:
+				wait_time = (max_ts - arrival_ts) / 1000
+				wait_time_records.append({
+					'vehicleType': arrival.get('vehicleType'),
+					'waitTime': wait_time,
+					'laneId': arrival.get('laneId', 'north')
+				})
+
 	ambulance_wait = compute_ambulance_wait_time(wait_time_records)
 	if ambulance_wait is None:
 		ambulance_wait = compute_ambulance_wait_time_from_decisions(events)
-	if snapshot_aggregated['num_decisions'] > 0:
-		return {
-			'avg_wait_time': float(snapshot_aggregated['avg_wait']),
-			'total_vehicles_crossed': total_vehicles_crossed,
-			'co2_estimate': float(snapshot_aggregated['avg_wait'] * 2.3),
-			'avg_green_utilization': compute_green_utilization(timeline, CYCLE_DURATION, timer_duration),
-			'ambulance_avg_wait_time': ambulance_wait
-		}
 	metrics = {
 		'avg_wait_time': compute_avg_wait_time([r['waitTime'] for r in wait_time_records]),
 		'total_vehicles_crossed': total_vehicles_crossed,
@@ -341,8 +392,20 @@ def compute_static_metrics(events, timer_duration=None):
 	print("MODE:", "STATIC")
 	print("TOTAL CROSSED:", total_vehicles_crossed)
 
-	if wait_time_records:
-		avg_wait_time = compute_avg_wait_time([record.get('waitTime', 0.0) for record in wait_time_records])
+	processed_records = []
+	for r in wait_time_records:
+		arrived_at = float(r.get('arrivedAt', 0.0) or 0.0)
+		wait_duration = float(r.get('waitTime', 0.0) or 0.0)
+		if arrived_at + wait_duration < float(timer_duration):
+			processed_records.append(r)
+		else:
+			capped_wait = float(timer_duration) - arrived_at
+			if capped_wait > 0:
+				r['waitTime'] = capped_wait
+				processed_records.append(r)
+
+	if processed_records:
+		avg_wait_time = compute_avg_wait_time([record.get('waitTime', 0.0) for record in processed_records])
 	else:
 		avg_wait_time = max(float(timer_duration) * 0.35, 5.0)
 
@@ -350,6 +413,6 @@ def compute_static_metrics(events, timer_duration=None):
 		'avg_wait_time': float(avg_wait_time),
 		'total_vehicles_crossed': int(total_vehicles_crossed),
 		'co2_estimate': float(avg_wait_time * 2.3),
-		'avg_green_utilization': 65.0,
-		'ambulance_avg_wait_time': compute_ambulance_wait_time(wait_time_records) if wait_time_records else None
+		'avg_green_utilization': compute_green_utilization(replay.get('timeline', {}), CYCLE_DURATION, timer_duration),
+		'ambulance_avg_wait_time': compute_ambulance_wait_time(processed_records) if processed_records else None
 	}

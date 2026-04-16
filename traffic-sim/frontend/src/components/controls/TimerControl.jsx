@@ -2,6 +2,7 @@
 import { useState } from 'react'  // React state
 import { useSimulationStore } from '../../state/simulationStore'
 import { createSession } from '../../services/api'
+import Button from '../ui/Button'
 
 // TimerControl component
 export default function TimerControl() {
@@ -33,17 +34,19 @@ export default function TimerControl() {
 	}
 
 	return (
-		<>
+		<div className="form-row" style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '1rem' }}>
 			{/* Timer label */}
-			<label>Set Timer (1-10 minutes)</label>
+			<label className="input-label" style={{ marginBottom: 0 }}>Set Timer (1-10 minutes)</label>
 			{/* Timer input */}
 			<input
 				type="number"
+				className="input-control"
+				style={{ width: '100px' }}
 				value={inputValue}
 				onChange={e => setInputValue(e.target.value)}
 			/>
 			{/* Confirm button */}
-			<button onClick={handleConfirm}>Confirm</button>
-		</>
+			<Button onClick={handleConfirm}>Confirm</Button>
+		</div>
 	)
 }

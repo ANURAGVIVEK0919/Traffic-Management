@@ -563,6 +563,11 @@ h3 {
   border-color: var(--border);
 }
 
+.lane-card-yellow {
+  border-color: #f59e0b;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+}
+
 .lane-card-header {
   display: flex;
   align-items: center;
@@ -589,9 +594,30 @@ h3 {
   color: var(--text);
 }
 
-.lane-count {
+.lane-status-yellow {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: #fcd34d;
+}
+
+.lane-stats-wrap {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin: var(--space-md) 0;
-  color: var(--muted);
+}
+
+.lane-count {
+  margin: 0;
+  color: var(--text);
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.lane-crossed {
+  margin: 0;
+  color: var(--primary);
+  font-weight: 600;
   font-size: 14px;
 }
 
@@ -705,6 +731,27 @@ h3 {
   .lane-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+.emergency-banner-pre-empting,
+.emergency-banner-active,
+.emergency-banner-recovering {
+  color: white;
+}
+
+.emergency-banner-pre-empting {
+  background: #f59e0b !important;
+  border-color: #d97706 !important;
+}
+
+.emergency-banner-active {
+  background: #ef4444 !important;
+  border-color: #dc2626 !important;
+}
+
+.emergency-banner-recovering {
+  background: #3b82f6 !important;
+  border-color: #2563eb !important;
 }
 
 @media (max-width: 900px) {
