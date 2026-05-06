@@ -55,4 +55,4 @@ def train_rl(steps=15000):
 
 
 if __name__ == '__main__':
-	train_rl(steps=15000)
+	train_rl(steps=14000)

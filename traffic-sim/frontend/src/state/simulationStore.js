@@ -22,11 +22,21 @@ const initialState = {
 	signalPhases: [],
 	totalVehiclesCrossed: 0,
 	tickCount: 0,
-	timeRemaining: null
+	timeRemaining: null,
+	videoSchedule: [],
+	videoDuration: null
 }
 
 export const useSimulationStore = create((set) => ({
 	...initialState,
+
+	setVideoSchedule: (videoSchedule) => set(() => ({
+		videoSchedule: Array.isArray(videoSchedule) ? videoSchedule : []
+	})),
+
+	setVideoDuration: (videoDuration) => set(() => ({
+		videoDuration
+	})),
 
 	// Set timer and timeRemaining
 	setTimer: (timerValue) => set((state) => ({

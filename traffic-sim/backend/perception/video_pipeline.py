@@ -26,6 +26,7 @@ from backend.perception.lane_processing import (
 
 # Debug mode: set to True to enable per-frame lane polygon visualization and logging
 DEBUG_MODE = True
+DEBUG = True
 
 LANE_COLORS = {
     'north': (0, 255, 255),
@@ -152,11 +153,12 @@ def build_homography_mapper(config, cap, detect_width, detect_height, scale_x, s
         lane_regions_top_view=lane_regions_top_view,
     )
 
-    print(f"[HOMOGRAPHY] Enabled with output_size={output_size}")
-    print(f"[HOMOGRAPHY] source_points_detect={src_points_detect}")
-    if destination_points is not None:
-        print(f"[HOMOGRAPHY] destination_points={destination_points}")
-    print(f"[HOMOGRAPHY] lane_regions_top_view keys={list(lane_regions_top_view.keys())}")
+    if DEBUG:
+        print(f"[HOMOGRAPHY] Enabled with output_size={output_size}")
+        print(f"[HOMOGRAPHY] source_points_detect={src_points_detect}")
+        if destination_points is not None:
+            print(f"[HOMOGRAPHY] destination_points={destination_points}")
+        print(f"[HOMOGRAPHY] lane_regions_top_view keys={list(lane_regions_top_view.keys())}")
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     return mapper
@@ -193,10 +195,11 @@ def build_smoothed_lane_state(raw_lane_state, previous_lane_state, alpha):
             'avgWaitTime': float(smoothed_wait),
         }
 
-        print(
-            f"[RL SMOOTH] lane={lane_id} raw_count={raw_count:.2f} smoothed_count={smoothed_count:.2f} "
-            f"raw_wait={raw_wait:.2f} smoothed_wait={smoothed_wait:.2f} alpha={float(alpha):.2f}"
-        )
+        if DEBUG:
+            print(
+                f"[RL SMOOTH] lane={lane_id} raw_count={raw_count:.2f} smoothed_count={smoothed_count:.2f} "
+                f"raw_wait={raw_wait:.2f} smoothed_wait={smoothed_wait:.2f} alpha={float(alpha):.2f}"
+            )
 
     return smoothed_state
 
@@ -583,7 +586,7 @@ def compute_queue_length_by_direction(
 
         vehicle_id = int(track_id)
         chosen_direction = _normalize_direction_label(det.get('lane')) or _normalize_direction_label(last_direction_by_vehicle.get(vehicle_id))
-        print("Vehicle:", vehicle_id, "Direction:", chosen_direction)
+        if DEBUG: print("Vehicle:", vehicle_id, "Direction:", chosen_direction)
         if chosen_direction not in TRAFFIC_DIRECTIONS:
             continue
         if vehicle_is_waiting(chosen_direction, active_green_lane):
@@ -800,7 +803,7 @@ class SimpleVehicleTracker:
         track = self.tracked_objects.get(track_id)
         current_time = float(track.get('last_seen_time', 0.0)) if track is not None else 0.0
 
-        print("DEDUP CHECK:", count_key, current_time)
+        if DEBUG: print("DEDUP CHECK:", count_key, current_time)
 
         if track_id in self.counted_ids:
             return False
@@ -1302,25 +1305,30 @@ def run_pipeline(
         raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    frame_delay = 1.0 / fps if fps > 0 else 0.033
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     sample_every_n = max(1, int(round(fps / sample_fps)))
     tick_seconds = sample_every_n / fps
     frame_delta_time = 1.0 / fps
 
     timer_duration = config.get('timer_duration') or estimate_timer_duration(video_path)
-    if session_id:
-        print(f"PIPELINE session_id: {session_id}")
-    else:
-        session = post_json(f"{base_url}/simulation/start", {'timer_duration': int(timer_duration)})
-        session_id = session['session_id']
-        print(f"PIPELINE session_id: {session_id}")
+    if DEBUG:
+        if session_id:
+            print(f"PIPELINE session_id: {session_id}")
+        else:
+            session = post_json(f"{base_url}/simulation/start", {'timer_duration': int(timer_duration)})
+            session_id = session['session_id']
+            print(f"PIPELINE session_id: {session_id}")
 
-    print(f"Session started: {session_id}")
-    print(f"Video FPS: {fps:.2f}, sample every {sample_every_n} frames ({tick_seconds:.2f}s)")
+    if DEBUG:
+        print(f"[PIPELINE SESSION] {session_id}")
+        print(f"Video FPS: {fps:.2f}, sample every {sample_every_n} frames ({tick_seconds:.2f}s)")
 
     frame_index = 0
     tick = 0
     events = []
+    last_flush_time = time.time()
+    flush_state = {"in_progress": False}
     run_start_ms = int(time.time() * 1000)
     smoothed_lane_state = {lane: {} for lane in ('north', 'east', 'south', 'west')}
     low_confidence_streak = 0
@@ -1411,9 +1419,7 @@ def run_pipeline(
         'latest_detections': [],
         'latest_lane_state': {lane: values.copy() for lane, values in default_lane_state.items()},
         'latest_lane_state_seq': -1,
-        'latest_rl_lane_state': {lane: values.copy() for lane, values in default_lane_state.items()},
-        'latest_rl_lane_state_seq': -1,
-        'latest_decision': last_decision,
+        'latest_decision': {'lane': 'north', 'duration': 10},
         'latest_decision_seq': -1,
         'active_green_lane': None,
         'latest_warped_debug': None,
@@ -1458,8 +1464,9 @@ def run_pipeline(
                 active_green_lane=worker_active_lane,
                 homography_mapper=homography_mapper_detect,
             )
-            print("FRAME ID:", frame_seq)
-            print("DETECTED OBJECTS:", detections_detect)
+            if DEBUG:
+                print("FRAME ID:", frame_seq)
+                print("DETECTED OBJECTS:", detections_detect)
 
             lane_state_raw = {}
             for lane_id, lane_data in lane_state_raw_detect.items():
@@ -1549,12 +1556,17 @@ def run_pipeline(
         'total_vehicles_crossed': 0,
         'crossed_by_lane': {lane: 0 for lane in TRAFFIC_DIRECTIONS},
     }
+    last_flush_time = time.time()
+    events = []
 
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
+
+            if frame_index % 30 == 0:
+                print(f"[PIPELINE] running frame={frame_index}")
 
             current_time = frame_index / fps
             with shared_lock:
@@ -1593,18 +1605,14 @@ def run_pipeline(
             detections = list(live_detections or [])
             tracks = list(last_tracked_detection_result.get('tracked_detections', []) or [])
 
-            print("\n--- FRAME START ---")
-            print("DETECTIONS:", len(detections))
-            print("TRACKS:", len(tracks))
-            if len(tracks) == 0:
-                print("TRACKER EMPTY")
+            if DEBUG:
+                if len(tracks) == 0:
+                    print(f"⚠️ [PIPELINE] No tracks found! Detections={len(detections)}")
+                else:
+                    print(f"✅ [PIPELINE] Tracks found: {len(tracks)}")
 
             for track in tracks:
-                center = get_center(track)
-                if center is None:
-                    continue
-                cx, cy = center
-                lane = get_lane((cx, cy))
+                lane = track.get('lane')
                 if lane not in TRAFFIC_DIRECTIONS:
                     continue
                 track_id = (
@@ -1630,16 +1638,18 @@ def run_pipeline(
                 'east': 0,
                 'west': 0,
             }
-            print("LANE ASSIGNMENT INPUT:", tracks)
-            print("LANE COUNTS BEFORE:", current_counts)
-            print("INITIAL COUNTS:", current_counts)
+            if DEBUG:
+                print("LANE ASSIGNMENT INPUT:", tracks)
+                print("LANE COUNTS BEFORE:", current_counts)
+                print("INITIAL COUNTS:", current_counts)
 
             for vehicle in active_vehicles.values():
                 lane = vehicle.get('lane')
                 if lane in current_counts:
                     current_counts[lane] += 1
 
-            print("LANE COUNTS AFTER:", current_counts)
+            if DEBUG:
+                print("LANE COUNTS AFTER:", current_counts)
 
             # Fallback to tracker-derived lane counts when per-track mapping collapses unexpectedly.
             tracker_lane_counts = build_lane_counts_from_detections(tracks)
@@ -1664,16 +1674,17 @@ def run_pipeline(
                         'west': int(smoothed_counts.get('west', 0) or 0),
                     }
 
-            print("ACTIVE VEHICLES:", len(active_vehicles))
+            if DEBUG: print("ACTIVE VEHICLES:", len(active_vehicles))
             if sum(current_counts.values()) == 0 and len(active_vehicles) > 0:
-                print("Using memory fallback")
+                if DEBUG: print("Using memory fallback")
                 current_counts = last_counts.copy()
 
             if sum(current_counts.values()) == 0 and len(active_vehicles) == 0:
-                print("NO VEHICLES → sending zeros (no skip)")
+                if DEBUG: print("NO VEHICLES → sending zeros (no skip)")
 
             last_counts = current_counts.copy()
-            print("LANE COUNTS:", current_counts)
+            if DEBUG:
+                print("LANE COUNTS:", current_counts)
             final_counts_array = [
                 int(current_counts.get("north", 0)),
                 int(current_counts.get("south", 0)),
@@ -1681,57 +1692,63 @@ def run_pipeline(
                 int(current_counts.get("west", 0)),
             ]
             
-            from backend.state.simulation_state import latest_results, latest_results_lock
 
-            with latest_results_lock:
-                latest_results["lane_counts"] = final_counts_array
+            # Store lane counts in shared_state database
+            from backend.database.shared_state import set_lane_counts
+            set_lane_counts(final_counts_array)
 
-            print("STORE UPDATE:", final_counts_array)
-            payload = {
-                'lane_counts': [
-                    int(current_counts.get('north', 0)),
-                    int(current_counts.get('south', 0)),
-                    int(current_counts.get('east', 0)),
-                    int(current_counts.get('west', 0)),
-                ],
-                'source': 'video_pipeline',
-                'rl_call_timestamp': time.time(),
-            }
-            print("SENDING TO RL lane_counts:", payload['lane_counts'])
-            print("FINAL RL PAYLOAD:", payload)
-            print("RL CALL TIMESTAMP:", payload['rl_call_timestamp'])
-            print(f"[LIVE RL INPUT] {payload}")
-            print("LIVE COUNTS:", current_counts)
-            try:
-                live_decision = post_json(f"{base_url}/rl/decision", payload)
-            except Exception as exc:
-                print(f"[LIVE RL ERROR] {exc} - using fallback decision")
-                live_decision = {'lane': 'north', 'duration': 10}
+            if DEBUG: print("STORE UPDATE:", final_counts_array)
+            if frame_index % 30 == 0:
+                print(f"[PIPELINE] session={session_id} counts={final_counts_array}")
 
-            if not isinstance(live_decision, dict):
-                print("[LIVE RL ERROR] Invalid RL decision type - using fallback decision")
-                live_decision = {'lane': 'north', 'duration': 10}
-
-            print("RL OUTPUT:", live_decision)
-            with shared_lock:
-                shared_state['latest_decision'] = live_decision
-                shared_state['latest_decision_seq'] = frame_index
-                shared_state['latest_rl_lane_state'] = {
-                    lane: dict(values) for lane, values in last_lane_state.items()
+            # Periodic submit-log for real-time UI updates
+            current_time_wall = time.time()
+            if len(events) >= 20 or (current_time_wall - last_flush_time > 2):
+                # Prepare current state snapshot as an rl_decision event for backend extraction
+                lane_state_snapshot = {
+                    lane: {"count": int(current_counts.get(lane, 0))}
+                    for lane in TRAFFIC_DIRECTIONS
                 }
-                shared_state['latest_rl_lane_state_seq'] = frame_index
+                
+                # Append a lane_state event so backend can compute metrics
+                events.append({
+                    "eventType": "rl_decision",
+                    "timestamp": current_time,
+                    "payload": {
+                        "snapshot": {
+                            "lane_state": lane_state_snapshot,
+                            "active_lane": "north",
+                            "duration": 10
+                        }
+                    }
+                })
+
+                try:
+                    if DEBUG: print(f"🚀 [PIPELINE] Flushing {len(events)} events to submit-log")
+                    post_json(f"{base_url}/simulation/submit-log", {
+                        "session_id": session_id,
+                        "events": events
+                    })
+                    events = [] # Clear batch after successful send
+                    last_flush_time = current_time_wall
+                except Exception as e:
+                    if DEBUG: print(f"❌ [PIPELINE] Submit-log failed: {e}")
+
+            with shared_lock:
+                shared_state['latest_decision_seq'] = frame_index
 
             sample_due = frame_index % sample_every_n == 0
             if sample_due:
-                print("\n==================== TICK ====================")
-                print(f"Frame: {frame_index}, Tick: {tick}")
+                if DEBUG:
+                    print("\n==================== TICK ====================")
+                    print(f"Frame: {frame_index}, Tick: {tick}")
                 with shared_lock:
                     lane_state_raw = shared_state['latest_lane_state']
                     detections = shared_state['latest_detections']
                     decision = shared_state['latest_decision']
                     warped_debug = shared_state['latest_warped_debug']
 
-                print("RAW LANE STATE:", lane_state_raw)
+                if DEBUG: print("RAW LANE STATE:", lane_state_raw)
 
                 if lane_state_raw:
                     last_lane_state_raw = lane_state_raw
@@ -1752,35 +1769,27 @@ def run_pipeline(
                     sum(det['confidence'] for det in detections if det.get('confidence') is not None) / len(detections)
                     if detections else 0.0
                 )
-                print("AVG CONFIDENCE:", average_confidence)
+                if DEBUG:
+                    print("AVG CONFIDENCE:", average_confidence)
 
                 if average_confidence < min_avg_confidence:
                     low_confidence_streak += 1
                     lane_state = last_lane_state
                     detections_for_overlay = []
-                    print("LOW CONFIDENCE → USING OLD STATE")
+                    if DEBUG: print("LOW CONFIDENCE → USING OLD STATE")
                 else:
                     low_confidence_streak = 0
                     detections_for_overlay = detections
 
                 lane_state = last_lane_state
 
-                tracked_ids = sorted(int(track_id) for track_id in tracker.tracked_objects.keys())
-                new_crossings_this_frame = len(last_tracked_detection_result.get('crossed_track_ids', []))
-                print("Tracked IDs:", tracked_ids)
-                print("Tracked vehicles:", len(tracker.tracked_objects))
-                print("Lane counts (raw):", last_tracked_detection_result['raw_counts'])
-                print("Lane counts (smoothed):", last_tracked_detection_result['smoothed_counts'])
-                print("Vehicles crossed:", last_tracked_detection_result['total_vehicles_crossed'])
-                print("Crossed total:", last_tracked_detection_result['total_vehicles_crossed'])
-                print("New crossings:", new_crossings_this_frame)
-                print("SMOOTHED LANE STATE:", lane_state)
-                print("DETECTIONS:", detections_for_overlay)
-                print("LINE COUNTS:", line_counts)
-                print("WAIT TIME:", wait_time_by_direction)
-                print("QUEUE LENGTH:", queue_length_by_direction)
-                print("WAIT TIMES:", wait_time_by_direction)
-                print("QUEUES:", queue_length_by_direction)
+                if DEBUG:
+                    print("Vehicles crossed:", last_tracked_detection_result['total_vehicles_crossed'])
+                    print("SMOOTHED LANE STATE:", lane_state)
+                    print("DETECTIONS:", detections_for_overlay)
+                    print("LINE COUNTS:", line_counts)
+                    print("WAIT TIME:", wait_time_by_direction)
+                    print("QUEUE LENGTH:", queue_length_by_direction)
                 with shared_lock:
                     shared_state['latest_line_counts'] = dict(line_counts)
                     shared_state['latest_wait_time_by_direction'] = dict(wait_time_by_direction)
@@ -1948,6 +1957,47 @@ def run_pipeline(
                 )
                 tick += 1
 
+                current_loop_time = time.time()
+                if len(events) >= 20 or (current_loop_time - last_flush_time > 2.0 and len(events) > 0):
+                    if flush_state["in_progress"]:
+                        print("[LIVE SYNC] Skipped (already running)")
+                    else:
+                        flush_state["in_progress"] = True
+                        batch_to_send = events[:]
+                        events.clear()
+                        last_flush_time = current_loop_time
+
+                        def flush_batch_thread(batch):
+                            import os
+                            submit_url = f"{base_url}/simulation/submit-log"
+                            payload = {'session_id': session_id, 'events': batch}
+                            
+                            # DEBUG: Extract counts for log
+                            d_counts = [0,0,0,0]
+                            for e in reversed(batch):
+                                if e.get('eventType') == 'rl_decision':
+                                    s = e.get('payload', {}).get('snapshot', {})
+                                    ls = s.get('lane_state', {})
+                                    def gc(l):
+                                        d = ls.get(l, {})
+                                        return int(d.get('count', 0)) if isinstance(d, dict) else int(d)
+                                    d_counts = [gc('north'), gc('south'), gc('east'), gc('west')]
+                                    break
+                            print(f"[PIPELINE] session={session_id} counts={d_counts}")
+                            print(f"[PIPELINE] sending events={len(batch)}")
+                            try:
+                                res = post_json(submit_url, payload)
+                                if res is None or not isinstance(res, dict) or not res.get('success'):
+                                    if DEBUG: print(f"⚠️ [LIVE SYNC WARNING] Invalid API response: {res}")
+                                else:
+                                    if DEBUG: print(f"✅ [LIVE SYNC] Successfully flushed {len(batch)} events to DB")
+                            except Exception as e:
+                                print(f"❌ [LIVE SYNC ERROR] Failed to send logs: {e}")
+                            finally:
+                                flush_state["in_progress"] = False
+
+                        threading.Thread(target=flush_batch_thread, args=(batch_to_send,), daemon=True).start()
+
                 if tick * tick_seconds >= timer_duration:
                     break
 
@@ -1960,10 +2010,14 @@ def run_pipeline(
                         break
 
             frame_index += 1
+            time.sleep(frame_delay)
     finally:
         stop_event.set()
         detection_thread.join(timeout=2.0)
 
+    print("[PIPELINE] video finished, flushing remaining data")
+    # wait for pending processing
+    time.sleep(2)
     cap.release()
 
     if active_green_lane is not None:

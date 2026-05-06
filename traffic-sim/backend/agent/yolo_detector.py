@@ -1,4 +1,5 @@
 # Import required modules
+DEBUG = False
 import logging
 import os
 import time
@@ -143,41 +144,56 @@ def line_side(p1, p2, point):
     return (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
 
 
-def get_lane(point):
-    lane = None
-    x, y = float(point[0]), float(point[1])
-    red_side = line_side(*RED, point)
-    yellow_side = line_side(*YELLOW, point)
-    brown_side = line_side(*BROWN, point)
-    black_side = line_side(*BLACK, point)
+def get_lane(point, lane_regions=None, frame_shape=None):
+	"""
+	Determine which lane a point belongs to using provided lane_regions.
+	Falls back to mathematical screen split if regions are missing.
+	"""
+	x, y = float(point[0]), float(point[1])
+	
+	if lane_regions:
+		from backend.perception.lane_processing import point_in_region
+		for lane_id in ('north', 'east', 'south', 'west'):
+			region = lane_regions.get(lane_id)
+			if region and point_in_region(x, y, region, buffer_px=50):
+				return lane_id
+				
+		# Fallback: Find closest lane center
+		best_lane = 'north'
+		min_dist = float('inf')
+		import math
+		for lane_id in ('north', 'east', 'south', 'west'):
+			region = lane_regions.get(lane_id)
+			if region and 'center' in region:
+				cx, cy = region['center']
+				dist = math.hypot(x - cx, y - cy)
+				if dist < min_dist:
+					min_dist = dist
+					best_lane = lane_id
+		return best_lane
+	
+	# Absolute fallback if lane_regions is missing entirely (ratio based)
+	if frame_shape:
+		h, w = frame_shape[:2]
+		rx = x / max(w, 1.0)
+		ry = y / max(h, 1.0)
+		if ry < rx and ry < (1 - rx): return 'north'
+		if ry > rx and ry > (1 - rx): return 'south'
+		if ry < rx and ry > (1 - rx): return 'east'
+		return 'west'
+	
+	return 'north'
 
-    # 🔴 NORTH
-    if red_side > 0 and y < 260:
-        lane = 'north'
-    # 🟡 EAST
-    elif yellow_side > 0 and x >= 800:
-        lane = 'east'
-    # 🟤 SOUTH
-    elif brown_side > 0 and y >= 500:
-        lane = 'south'
-    # ⚫ WEST
-    elif black_side < 0 and x < 520 and y >= 180:
-        lane = 'west'
-    else:
-        lane = 'north'
 
-    print(f"POINT: {point} → LANE: {lane}")
-    return lane
-
-
-def assign_lane(center_x, center_y, lane_regions, track_id=None, homography_mapper=None):
+def assign_lane(center_x, center_y, lane_regions, track_id=None, homography_mapper=None, frame_shape=None):
     # Lane assignment is now exact line-based classification using image coordinates.
     point = (float(center_x), float(center_y))
-    lane = get_lane(point)
-    print(f"CENTER: ({float(center_x):.1f}, {float(center_y):.1f})")
-    print(f"ASSIGNED LANE: track_id={track_id} → lane={lane}")
+    lane = get_lane(point, lane_regions=lane_regions, frame_shape=frame_shape)
+    if DEBUG:
+        print(f"CENTER: ({float(center_x):.1f}, {float(center_y):.1f})")
+        print(f"ASSIGNED LANE: track_id={track_id} → lane={lane}")
     if lane is None:
-        print("⚠️ GAP DETECTED:", point)
+        if DEBUG: print("⚠️ GAP DETECTED:", point)
         lane = 'north'
     return lane, point
 
@@ -263,7 +279,7 @@ def restore_recent_first_seen_time(observation_centroid, lane_id, current_time):
     if restored is None:
         return None
 
-    print(f"[TRACKER] Restored wait time for re-entered vehicle")
+    if DEBUG: print(f"[TRACKER] Restored wait time for re-entered vehicle")
     return float(restored.get('first_seen_time', current_time))
 
 
@@ -279,7 +295,7 @@ def match_observations_to_tracks(observations):
     return stable_tracker.associate(observations, tracked_vehicles)
 
 
-def create_track(observation, lane_regions, current_time, frame_center, homography_mapper=None):
+def create_track(observation, lane_regions, current_time, frame_center, homography_mapper=None, frame_shape=None):
     global next_track_id
     transformed_centroid = None
     lane_point = observation.get('bbox_center') or observation['centroid']
@@ -293,16 +309,18 @@ def create_track(observation, lane_regions, current_time, frame_center, homograp
         lane_regions,
         track_id=track_id,
         homography_mapper=homography_mapper,
+        frame_shape=frame_shape
     )
     if lane_id is None and observation.get('bbox_center') is not None:
         fallback_point = observation['centroid']
-        print(f"[LANE RETRY] track_id={track_id} trying bottom center point={fallback_point}")
+        if DEBUG: print(f"[LANE RETRY] track_id={track_id} trying bottom center point={fallback_point}")
         lane_id, bottom_center = assign_lane(
             fallback_point[0],
             fallback_point[1],
             lane_regions,
             track_id=track_id,
             homography_mapper=homography_mapper,
+            frame_shape=frame_shape
         )
     if lane_id is None:
         return None
@@ -338,12 +356,12 @@ def create_track(observation, lane_regions, current_time, frame_center, homograp
         'history': [observation['centroid']],
     }
     tracked_vehicles[track_id] = track
-    print(f"[TRACKER] New ID {track_id} at t={current_time:.2f}s")
+    if DEBUG: print(f"[TRACKER] New ID {track_id} at t={current_time:.2f}s")
     next_track_id += 1
     return track
 
 
-def update_track(track_id, observation, lane_regions, current_time, frame_center, homography_mapper=None):
+def update_track(track_id, observation, lane_regions, current_time, frame_center, homography_mapper=None, frame_shape=None):
     track = tracked_vehicles[track_id]
     lane_point = observation.get('bbox_center') or observation['centroid']
     previous_centroid = track['centroid']
@@ -361,12 +379,6 @@ def update_track(track_id, observation, lane_regions, current_time, frame_center
         track['first_seen_time'] = float(current_time)
 
     lane_id = track.get('lane')
-    transformed_centroid = track.get('transformed_centroid')
-
-    if homography_mapper is not None:
-        transformed_centroid = homography_mapper.transform_point(observation['centroid'][0], observation['centroid'][1])
-        track['transformed_centroid'] = transformed_centroid
-
     if lane_id is None:
         lane_id, bottom_center = assign_lane(
             lane_point[0],
@@ -374,16 +386,18 @@ def update_track(track_id, observation, lane_regions, current_time, frame_center
             lane_regions,
             track_id=track_id,
             homography_mapper=homography_mapper,
+            frame_shape=frame_shape
         )
         if lane_id is None and observation.get('bbox_center') is not None:
             fallback_point = observation['centroid']
-            print(f"[LANE RETRY] track_id={track_id} trying bottom center point={fallback_point}")
+            if DEBUG: print(f"[LANE RETRY] track_id={track_id} trying bottom center point={fallback_point}")
             lane_id, bottom_center = assign_lane(
                 fallback_point[0],
                 fallback_point[1],
                 lane_regions,
                 track_id=track_id,
                 homography_mapper=homography_mapper,
+                frame_shape=frame_shape
             )
         if lane_id is not None:
             track['lane'] = lane_id
@@ -391,7 +405,7 @@ def update_track(track_id, observation, lane_regions, current_time, frame_center
             track['bottom_center'] = bottom_center
 
     if lane_id is not None:
-        inside_lane = get_lane(lane_point) == lane_id
+        inside_lane = get_lane(lane_point, lane_regions=lane_regions, frame_shape=frame_shape) == lane_id
         movement_to_center = toward_intersection(previous_centroid, observation['centroid'], frame_center)
         movement_ok = movement_to_center if track.get('direction') == 'incoming' else not movement_to_center
         if inside_lane and movement_ok:
@@ -425,7 +439,7 @@ def age_tracks(matched_track_ids, current_time):
                 'lost_at': float(current_time),
                 'last_centroid': [float(last_centroid[0]), float(last_centroid[1])] if isinstance(last_centroid, (list, tuple)) and len(last_centroid) == 2 else None,
             }
-            print(f"[TRACKER] Removed ID {track_id} after {missed_count} missed frames")
+            if DEBUG: print(f"[TRACKER] Removed ID {track_id} after {missed_count} missed frames")
             expired_track_ids.append(track_id)
             tracked_vehicles.pop(track_id, None)
     return expired_track_ids
@@ -451,17 +465,19 @@ def build_lane_state(current_time):
             first_seen_time = float(track.get('first_seen_time', track.get('entered_at', current_time)))
             wait_time = max(0.0, float(current_time) - first_seen_time)
             waits.append(wait_time)
-            print(
-                f"[WAIT DEBUG] vehicle_id={track.get('id')} lane={lane_id} "
-                f"first_seen={first_seen_time:.3f} current={float(current_time):.3f} wait={wait_time:.3f}"
-            )
+            if DEBUG:
+                print(
+                    f"[WAIT DEBUG] vehicle_id={track.get('id')} lane={lane_id} "
+                    f"first_seen={first_seen_time:.3f} current={float(current_time):.3f} wait={wait_time:.3f}"
+                )
         lane_state[lane_id]['avgWaitTime'] = float(sum(waits) / len(waits)) if waits else 0.0
-        print(
-            f"[WAIT DEBUG] lane={lane_id} avgWaitTime={lane_state[lane_id]['avgWaitTime']:.3f} "
-            f"count={lane_state[lane_id]['count']}"
-        )
+        if DEBUG:
+            print(
+                f"[WAIT DEBUG] lane={lane_id} avgWaitTime={lane_state[lane_id]['avgWaitTime']:.3f} "
+                f"count={lane_state[lane_id]['count']}"
+            )
 
-    print("LANE COUNTS:", {lane: lane_state[lane]['count'] for lane in lane_state})
+    if DEBUG: print("LANE COUNTS:", {lane: lane_state[lane]['count'] for lane in lane_state})
 
     return lane_state
 
@@ -491,14 +507,16 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
         return empty
 
     results = yolo_model(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)
-    print(f"[YOLO] Frame detections: {len(results[0].boxes)}")
+    if DEBUG:
+        print(f"[YOLO] Frame detections: {len(results[0].boxes)}")
+        print("FRAME SIZE:", frame.shape)
 
     debug_detections = []
     if current_time is None:
+        import time
         current_time = time.monotonic()
     frame_height, frame_width = frame.shape[:2]
     frame_center = (frame_width / 2.0, frame_height / 2.0)
-    print("FRAME SIZE:", frame.shape)
 
     observations = []
 
@@ -516,7 +534,7 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             bbox_center = ((float(x1) + float(x2)) / 2.0, (float(y1) + float(y2)) / 2.0)
             center_x, center_y = get_bottom_center(int(x1), int(y1), int(x2), int(y2))
-            print("CENTER POINT:", (float(bbox_center[0]), float(bbox_center[1])))
+            if DEBUG: print("CENTER POINT:", (float(bbox_center[0]), float(bbox_center[1])))
             observations.append({
                 'label': cls,
                 'confidence': float(box.conf[0]) if box.conf is not None else None,
@@ -528,11 +546,12 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
     for detection in observations:
         bbox = detection.get('bbox', [0.0, 0.0, 0.0, 0.0])
         confidence = float(detection.get('confidence') or 0.0)
-        print(
-            f"DETECTED: {detection.get('label')} conf={confidence:.3f} "
-            f"bbox=({float(bbox[0]):.1f},{float(bbox[1]):.1f},{float(bbox[2]):.1f},{float(bbox[3]):.1f})"
-        )
-    print(f"TOTAL DETECTIONS: {len(observations)}")
+        if DEBUG:
+            print(
+                f"DETECTED: {detection.get('label')} conf={confidence:.3f} "
+                f"bbox=({float(bbox[0]):.1f},{float(bbox[1]):.1f},{float(bbox[2]):.1f},{float(bbox[3]):.1f})"
+            )
+    if DEBUG: print(f"TOTAL DETECTIONS: {len(observations)}")
 
     global _debug_frame_saved
     if not _debug_frame_saved and observations:
@@ -547,7 +566,7 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
             cx, cy = obs.get('centroid') or (0.0, 0.0)
             cv2.circle(debug_frame, (int(float(cx)), int(float(cy))), 4, (255, 255, 0), -1)
         cv2.imwrite("debug_frame.jpg", debug_frame)
-        print("Saved lane debug frame: debug_frame.jpg")
+        if DEBUG: print("Saved lane debug frame: debug_frame.jpg")
         _debug_frame_saved = True
 
     matched_pairs, unmatched_track_ids, unmatched_observations = match_observations_to_tracks(observations)
@@ -562,6 +581,7 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
             current_time,
             frame_center,
             homography_mapper=homography_mapper,
+            frame_shape=frame.shape
         )
 
     age_tracks(matched_track_ids, current_time)
@@ -573,6 +593,7 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
             current_time,
             frame_center,
             homography_mapper=homography_mapper,
+            frame_shape=frame.shape
         )
 
     lane_state = build_lane_state(current_time)
@@ -603,18 +624,20 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
                 'moving_toward_intersection': bool(track.get('movement_ok', False)),
                 'inside_lane': bool(track.get('inside_lane', False)),
             })
-            print(
-                f"[WAIT DEBUG] track_id={track.get('id')} lane={lane_id} "
-                f"wait_time={wait_time:.3f} label={track.get('label')}"
-            )
+            if DEBUG:
+                print(
+                    f"[WAIT DEBUG] track_id={track.get('id')} lane={lane_id} "
+                    f"wait_time={wait_time:.3f} label={track.get('label')}"
+                )
 
     for track in tracked_vehicles.values():
         bbox = track.get('bbox') or [0.0, 0.0, 0.0, 0.0]
-        print(
-            f"TRACK ID: {track.get('id')} bbox=({float(bbox[0]):.1f},{float(bbox[1]):.1f},"
-            f"{float(bbox[2]):.1f},{float(bbox[3]):.1f})"
-        )
-    print(f"VALID TRACKS: {len(debug_detections)}")
+        if DEBUG:
+            print(
+                f"TRACK ID: {track.get('id')} bbox=({float(bbox[0]):.1f},{float(bbox[1]):.1f},"
+                f"{float(bbox[2]):.1f},{float(bbox[3]):.1f})"
+            )
+    if DEBUG: print(f"VALID TRACKS: {len(debug_detections)}")
 
     if return_debug:
         return lane_state, debug_detections

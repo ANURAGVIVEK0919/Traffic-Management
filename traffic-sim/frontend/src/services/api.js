@@ -59,72 +59,41 @@ export async function createSession(timerDuration) {
 	return await response.json()
 }
 
-export async function fetchLiveCounts() {
-	const response = await fetch(`${BASE_URL}/simulation/results/latest`, {
-		method: 'GET',
-		cache: 'no-store',
-		headers: {
-			'Content-Type': 'application/json'
-		}
-	})
-	const data = await response.json()
-	console.log('API:', data?.lane_counts)
-	return Array.isArray(data?.lane_counts) ? data.lane_counts : [0, 0, 0, 0]
+export async function fetchLiveCounts(sessionId) {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  const response = await fetch(`${BASE_URL}/simulation/results/latest${query}`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  })
+  const data = await response.json()
+  console.log('API:', data?.lane_counts)
+  // Backend may return an object {north:..., south:..., east:..., west:...} or an array.
+  const counts = data?.lane_counts
+  if (Array.isArray(counts)) {
+    // Convert array [north, south, east, west] to object
+    return {
+      north: Number(counts[0] || 0),
+      south: Number(counts[1] || 0),
+      east: Number(counts[2] || 0),
+      west: Number(counts[3] || 0)
+    }
+  }
+  if (counts && typeof counts === 'object') {
+    return {
+      north: Number(counts.north || 0),
+      south: Number(counts.south || 0),
+      east: Number(counts.east || 0),
+      west: Number(counts.west || 0)
+    }
+  }
+  // Fallback to zeros
+  return { north: 0, south: 0, east: 0, west: 0 }
 }
 
-// POST lane snapshot to RL decision endpoint
-export async function fetchRLDecision(snapshot) {
-	const laneState = snapshot?.lane_state || {}
-	const rlPayload = {
-		lane_counts: [
-			Number(laneState?.north?.count || 0),
-			Number(laneState?.south?.count || 0),
-			Number(laneState?.east?.count || 0),
-			Number(laneState?.west?.count || 0)
-		],
-		timestamp: Number(snapshot?.timestamp || Date.now() / 1000),
-		active_green_lane: snapshot?.active_green_lane || null,
-		source: 'frontend_fetchRLDecision',
-		rl_call_timestamp: Date.now() / 1000
-	}
-
-	try {
-		const response = await fetch(`${BASE_URL}/rl/decision`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify(rlPayload)
-		})
-
-		if (!response.ok) {
-			throw new Error(`RL decision request failed with status ${response.status}`)
-		}
-
-		const data = await response.json()
-		console.log('RL decision:', data)
-		if (data && typeof data === 'object') {
-			return data
-		}
-	} catch (error) {
-		console.warn('fetchRLDecision fallback:', error)
-		return {
-			lane: 'north',
-			duration: 5,
-			debug: {
-				source: 'frontend_fallback'
-			}
-		}
-	}
-
-	return {
-		lane: 'north',
-		duration: 5,
-		debug: {
-			source: 'frontend_fallback_invalid_response'
-		}
-	}
-}
+// Removed fetchRLDecision
 
 // POST event log to backend
 export async function submitEventLog(sessionId, events) {

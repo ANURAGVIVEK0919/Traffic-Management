@@ -1,3 +1,4 @@
+DEBUG = False
 from backend.services.simulation_service import create_session  # Import service function
 from backend.services.simulation_service import ensure_session_exists, save_event_log, save_simulation_results, save_signal_log
 from backend.services.static_replay_service import compute_dynamic_metrics, compute_static_metrics
@@ -21,6 +22,11 @@ def _sanitize_metrics(metrics):
 
 def handle_create_session(timer_duration):
 	"""Controller: create session and return its id."""
+	# Block manual session creation if video processing is active
+	from backend.database.shared_state import is_video_processing_active
+	if is_video_processing_active():
+		return {"success": False, "error": "Manual input is disabled while video processing is active."}
+
 	session_id = create_session(timer_duration)  # Call service
 	if not session_id:
 		print("❌ ERROR: session_id is None or empty!")
@@ -53,132 +59,164 @@ def resolve_session_id(identifier):
 
 # Handle event log submission and metrics computation
 def handle_submit_log(session_id, events):
-	try:
-		session_id = resolve_session_id(session_id)
-		print(f"SESSION: {session_id}")
-		print(f"EVENTS TYPE: {type(events)}")
-		print(f"EVENT COUNT: {len(events) if events else 0}")
-		print(f"EVENT SAMPLE: {events[:2] if isinstance(events, list) else events}")
-		print(f"BACKEND received session_id: {session_id}")
-		if not session_id:
-			return JSONResponse(status_code=400, content={"error": "Invalid session_id"})
-		if not isinstance(events, list) or not events:
-			return JSONResponse(status_code=400, content={"error": "Invalid events"})
-		ensure_session_exists(session_id)
-		print(f"[SUBMIT LOG] session_id={session_id} events={len(events)}")
-		save_event_log(session_id, events)
-		# Fetch timer_duration from DB
-		conn = get_connection()
-		cursor = conn.cursor()
-		cursor.execute("SELECT timer_duration FROM simulation_session WHERE id = ?", (session_id,))
-		row = cursor.fetchone()
-		conn.close()
-		timer_duration = row[0] if row else 0
-		# Compute metrics
-		dynamic_results = compute_dynamic_metrics(events, timer_duration)
-		static_results = compute_static_metrics(events, timer_duration)
+    import os
+    try:
+        session_id = resolve_session_id(session_id)
+        if DEBUG:
+            print(f"[CONTROLLER] submit received session={session_id} PID={os.getpid()}")
+            print(f"[CONTROLLER] event count={len(events) if events else 0}")
+        
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "Invalid session_id"})
+        if not isinstance(events, list) or not events:
+            return JSONResponse(status_code=400, content={"error": "Invalid events"})
+        
+        ensure_session_exists(session_id)
+        save_event_log(session_id, events)
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT timer_duration FROM simulation_session WHERE id = ?", (session_id,))
+        row = cursor.fetchone()
+        conn.close()
+        timer_duration = row[0] if row else 0
 
-		print(f"[SAVE RESULTS] session_id={session_id}")
-		print(f"DYNAMIC: {dynamic_results}")
-		print(f"STATIC: {static_results}")
-		if not dynamic_results:
-			raise RuntimeError(f"Dynamic results missing for session {session_id}")
-		if not static_results:
-			static_results = dynamic_results.copy()
+        dynamic_results = compute_dynamic_metrics(events, timer_duration)
+        static_results = compute_static_metrics(events, timer_duration)
+        
+        if DEBUG: print(f"[CONTROLLER] dynamic results calculated")
 
-		dynamic_results = _sanitize_metrics(dynamic_results)
-		static_results = _sanitize_metrics(static_results)
+        # Correct extraction from raw events (Source of truth)
+        lane_counts = [0, 0, 0, 0]
+        active_lane = "north"
+        duration = 5
 
-		print("[SUBMIT LOG] calling save_simulation_results")
-		try:
-			save_result = save_simulation_results(session_id, dynamic_results, static_results)
-		except Exception as e:
-			print("❌ DB SAVE ERROR:", e)
-			raise
-		print(f"[SUBMIT LOG] save_simulation_results result={save_result}")
-		if isinstance(save_result, dict) and save_result.get("error"):
-			return JSONResponse(status_code=500, content=save_result)
-		return {"success": True}
-	except Exception as e:
-		import traceback
-		print("🔥 BACKEND ERROR:", str(e))
-		traceback.print_exc()
-		return JSONResponse(status_code=500, content={"error": str(e)})
+        for event in reversed(events):
+            if isinstance(event, dict) and event.get("eventType") == "rl_decision":
+                snapshot = event.get("payload", {}).get("snapshot", {})
+                lane_state = snapshot.get("lane_state", {})
+
+                lane_counts = [
+                    int(lane_state.get("north", {}).get("count", 0)) if isinstance(lane_state.get("north"), dict) else int(lane_state.get("north", 0)),
+                    int(lane_state.get("south", {}).get("count", 0)) if isinstance(lane_state.get("south"), dict) else int(lane_state.get("south", 0)),
+                    int(lane_state.get("east", {}).get("count", 0)) if isinstance(lane_state.get("east"), dict) else int(lane_state.get("east", 0)),
+                    int(lane_state.get("west", {}).get("count", 0)) if isinstance(lane_state.get("west"), dict) else int(lane_state.get("west", 0)),
+                ]
+                active_lane = event.get("laneId") or snapshot.get("active_lane")
+                duration = snapshot.get("duration", 5)
+
+                if DEBUG: print(f"[CONTROLLER] counts extracted={lane_counts} active={active_lane}")
+                break
+        
+        counts = lane_counts
+
+        dynamic_results = _sanitize_metrics(dynamic_results)
+        static_results = _sanitize_metrics(static_results)
+
+        try:
+            save_simulation_results(session_id, dynamic_results, static_results)
+            with latest_results_lock:
+                latest_results[session_id] = {
+                    "lane_counts": counts,
+                    "active_lane": active_lane,
+                    "duration": duration
+                }
+                latest_results['lane_counts'] = counts # legacy fallback
+                print(f"[MEMORY STATE] {latest_results}")
+                print(f"[MEMORY] session={session_id} counts={counts}")
+
+        except Exception as e:
+            print("❌ DB SAVE ERROR:", e)
+            raise
+        print(f"[SUBMIT LOG] save_simulation_results done")
+        return {"success": True}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 # Handle result retrieval
 def handle_get_results(session_id):
-	session_id = resolve_session_id(session_id)
-	# Fetch results from service
-	results = get_simulation_results(session_id)
-	if results is None or not isinstance(results, dict):
-		results = {}
-	if "error" in results:
-		results.setdefault('dynamic', {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}})
-		results.setdefault('static', {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}})
-		results.setdefault('actual_signal_log', [])
-		return results
-	# Format and return comparison
-	return format_comparison(
-		session_id,
-		results["dynamic"],
-		results["static"],
-		results.get("actual_signal_log", []),
-	)
+    session_id = resolve_session_id(session_id)
+    # Fetch results from service
+    results = get_simulation_results(session_id)
+    if results is None or not isinstance(results, dict):
+        results = {}
+    if "error" in results:
+        results.setdefault('dynamic', {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}})
+        results.setdefault('static', {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}})
+        results.setdefault('actual_signal_log', [])
+        return results
+    # Format and return comparison
+    return format_comparison(
+        session_id,
+        results["dynamic"],
+        results["static"],
+        results.get("actual_signal_log", []),
+    )
 
 
 def handle_get_results_compare(rl_id, static_id):
-	rl_session_id = resolve_session_id(rl_id)
-	static_session_id = resolve_session_id(static_id)
-	rl_results = get_simulation_results(rl_session_id)
-	static_results = get_simulation_results(static_session_id)
+    rl_session_id = resolve_session_id(rl_id)
+    static_session_id = resolve_session_id(static_id)
+    rl_results = get_simulation_results(rl_session_id)
+    static_results = get_simulation_results(static_session_id)
 
-	if not isinstance(rl_results, dict) or "error" in rl_results:
-		rl_results = {'dynamic': {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}}}
-	if not isinstance(static_results, dict) or "error" in static_results:
-		static_results = {'dynamic': {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}}}
+    if not isinstance(rl_results, dict) or "error" in rl_results:
+        rl_results = {'dynamic': {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}}}
+    if not isinstance(static_results, dict) or "error" in static_results:
+        static_results = {'dynamic': {'lane_state': {'north': 0, 'south': 0, 'east': 0, 'west': 0}}}
 
-	comparison_id = f"{rl_session_id}__vs__{static_session_id}"
-	return format_comparison(comparison_id, rl_results.get("dynamic", {}), static_results.get("dynamic", {}))
+    comparison_id = f"{rl_session_id}__vs__{static_session_id}"
+    return format_comparison(comparison_id, rl_results.get("dynamic", {}), static_results.get("dynamic", {}))
 
 
-def handle_get_latest_results():
-	try:
-		with latest_results_lock:
-			lane_counts = latest_results.get('lane_counts', [0, 0, 0, 0])
-			counts = [
-				int(lane_counts[0] if len(lane_counts) > 0 else 0),
-				int(lane_counts[1] if len(lane_counts) > 1 else 0),
-				int(lane_counts[2] if len(lane_counts) > 2 else 0),
-				int(lane_counts[3] if len(lane_counts) > 3 else 0),
-			]
+def handle_get_latest_results(session_id=None):
+    import os
+    try:
+        state = {"lane_counts": [0, 0, 0, 0], "active_lane": None}
+        with latest_results_lock:
+            if DEBUG:
+                print(f"[MEMORY] full state dump (PID: {os.getpid()})")
+                print(f"[MEMORY] fetch session={session_id}")
+            if session_id and session_id in latest_results:
+                val = latest_results[session_id]
+                if isinstance(val, dict):
+                    state = val
+                else:
+                    state = {"lane_counts": val, "active_lane": None}
+            else:
+                counts = latest_results.get('lane_counts', [0, 0, 0, 0])
+                state = {"lane_counts": counts, "active_lane": None}
 
-		print("API RETURN:", counts)
+        if DEBUG: print(f"[API] Returning latest state: {state}")
 
-		return {
-			"lane_counts": counts,
-			"source": "video"
-		}
-	except Exception as exc:
-		print("❌ LATEST COUNTS FETCH ERROR:", exc)
-		return {"lane_counts": [0, 0, 0, 0], "source": "video"}
+        return {
+            **state,
+            "source": "video"
+        }
+    except Exception as exc:
+        print("❌ LATEST COUNTS FETCH ERROR:", exc)
+        return {"lane_counts": [0, 0, 0, 0], "source": "video"}
 
 
 def handle_get_decision_logs(session_id):
-	session_id = resolve_session_id(session_id)
-	return {"sessionId": session_id, "decisionLogs": get_decision_logs(session_id)}
+    session_id = resolve_session_id(session_id)
+    return {"sessionId": session_id, "decisionLogs": get_decision_logs(session_id)}
 
 
 def handle_get_session_report(session_id):
-	session_id = resolve_session_id(session_id)
-	return build_report(session_id)
+    session_id = resolve_session_id(session_id)
+    return build_report(session_id)
 
 
 def handle_log_signal(session_id, lane, duration):
-	session_id = resolve_session_id(session_id)
-	if not session_id:
-		return JSONResponse(status_code=400, content={"error": "Invalid session_id"})
+    session_id = resolve_session_id(session_id)
+    if not session_id:
+        return JSONResponse(status_code=400, content={"error": "Invalid session_id"})
 
-	result = save_signal_log(session_id, lane, duration)
-	if isinstance(result, dict) and result.get("error"):
-		return JSONResponse(status_code=400, content=result)
-	return result
+    result = save_signal_log(session_id, lane, duration)
+    if isinstance(result, dict) and result.get("error"):
+        return JSONResponse(status_code=400, content=result)
+    return result

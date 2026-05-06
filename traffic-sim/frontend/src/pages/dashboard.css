@@ -790,3 +790,163 @@ h3 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* LLM Integration Styles */
+
+.llm-panel, .llm-config-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-bottom: var(--space-xl);
+  overflow: hidden;
+}
+
+.llm-panel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.llm-icon {
+  font-size: 18px;
+}
+
+.llm-title {
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+}
+
+.llm-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--primary);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.llm-empty {
+  padding: var(--space-lg);
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.llm-log {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.llm-entry {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+}
+
+.llm-entry:last-child {
+  border-bottom: none;
+}
+
+.llm-entry-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.llm-lane-chip {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 99px;
+  color: white;
+}
+
+.llm-duration {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.llm-latest-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--primary);
+  margin-left: auto;
+}
+
+.llm-explanation {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.llm-config-input-row {
+  display: flex;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+}
+
+.llm-config-input {
+  flex: 1;
+}
+
+.llm-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: 0 var(--space-md) var(--space-md);
+}
+
+.llm-example-chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.llm-example-chip:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.llm-ack {
+  padding: var(--space-sm) var(--space-md);
+  background: #ecfdf5;
+  border-top: 1px solid #d1fae5;
+  margin: 0;
+  font-size: 13px;
+  color: #065f46;
+}
+
+.llm-ack-error {
+  background: #fef2f2;
+  border-top: 1px solid #fee2e2;
+  color: #991b1b;
+}
+
+.simulation-layout {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: var(--space-xl);
+}
+
+@media (max-width: 1200px) {
+  .simulation-layout {
+    grid-template-columns: 1fr;
+  }
+}

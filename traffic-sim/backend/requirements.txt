@@ -9,3 +9,6 @@ opencv-python
 requests
 aiofiles
 matplotlib
+groq
+python-dotenv
+python-multipart

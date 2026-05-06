@@ -1,24 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSimulationStore } from '../state/simulationStore';
-import { fetchLiveCounts, logSignalPhase, createSession } from '../services/api';
+import { fetchLiveCounts, logSignalPhase, createSession, submitEventLog } from '../services/api';
+import { getModelDuration, explainDecision } from '../services/signalApi';
 import { buildLaneSnapshot } from '../utils/simulationUtils';
 import { moveVehicles, checkVehicleCrossing } from '../utils/vehicleUtils';
 import { generateVehicleId } from '../utils/simulationUtils';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import TimerControl from '../components/controls/TimerControl';
-
 import AppSidebar from '../components/layout/AppSidebar';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Section from '../components/ui/Section';
+import TimerControl from '../components/controls/TimerControl';
+import LLMConfigBox from '../components/simulation/LLMConfigBox';
+import LLMExplanationPanel from '../components/dashboard/LLMExplanationPanel';
 import './dashboard.css';
 
 const VEHICLE_TYPES = ['car', 'bike', 'ambulance', 'truck', 'bus'];
-const LANE_ORDER = ['north', 'west', 'south', 'east'];
-const MIN_GREEN = 10;
+const LANE_ORDER = ['north', 'east', 'south', 'west'];
+const MIN_GREEN = 8;
 const MAX_GREEN = 30;
 const YELLOW_TIME = 5;
-const INITIAL_CYCLE_TIME = 10;
+const INITIAL_CYCLE_TIME = 8;
 
 const VEHICLE_TIME_MULTIPLIERS = {
   car: 1.0,
@@ -43,7 +45,7 @@ export default function SimulationPage() {
 
   const [initialCyclesDone, setInitialCyclesDone] = useState(0);
   const [isYellowPhase, setIsYellowPhase] = useState(false);
-  const [plannedDuration, setPlannedDuration] = useState(10);
+  const [plannedDuration, setPlannedDuration] = useState(8);
   const [crossedThisPhase, setCrossedThisPhase] = useState(0);
   const [backendCounts, setBackendCounts] = useState({
     north: 0,
@@ -55,12 +57,15 @@ export default function SimulationPage() {
   const [emergencyPhase, setEmergencyPhase] = useState(null);
   const [emergencyLane, setEmergencyLane] = useState(null);
   const [interruptedLane, setInterruptedLane] = useState(null);
+  const [interruptedRemainingTime, setInterruptedRemainingTime] = useState(0);
 
   const status = useSimulationStore(state => state.status);
   const mode = useSimulationStore(state => state.mode);
   const lanes = useSimulationStore(state => state.lanes);
   const lightStates = useSimulationStore(state => state.lightStates);
-  const timeRemaining = useSimulationStore(state => state.timeRemaining);
+  const timeRemaining = useSimulationStore((state) => state.timeRemaining);
+  const videoSchedule = useSimulationStore((state) => state.videoSchedule);
+  const decrementTimer = useSimulationStore((state) => state.decrementTimer);
   const sessionId = useSimulationStore(state => state.sessionId);
 
   const startSimulation = useSimulationStore(state => state.startSimulation);
@@ -80,7 +85,6 @@ export default function SimulationPage() {
   const setSignalPhasesStore = useSimulationStore(state => state.setSignalPhases);
   const incrementTotalVehiclesCrossed = useSimulationStore(state => state.incrementTotalVehiclesCrossed);
   const setTotalVehiclesCrossed = useSimulationStore(state => state.setTotalVehiclesCrossed);
-  const decrementTimer = useSimulationStore(state => state.decrementTimer);
   const incrementTick = useSimulationStore(state => state.incrementTick);
   const addVehicleToLane = useSimulationStore(state => state.addVehicleToLane);
   const tickCount = useSimulationStore(state => state.tickCount);
@@ -101,6 +105,18 @@ export default function SimulationPage() {
   const emergencyPhaseRef = useRef(emergencyPhase);
   const emergencyLaneRef = useRef(emergencyLane);
   const interruptedLaneRef = useRef(interruptedLane);
+  const interruptedRemainingTimeRef = useRef(0);
+
+  // LLM-configurable controller params (set via LLMConfigBox)
+  const controllerConfigRef = useRef({
+    max_green: MAX_GREEN,
+    min_green: MIN_GREEN,
+    yellow_time: YELLOW_TIME,
+    ambulance_preempt_immediately: true,
+  });
+
+  const [latestExplanation, setLatestExplanation] = useState(null);
+  const [explanationLog, setExplanationLog] = useState([]);
 
   const navigate = useNavigate();
 
@@ -115,6 +131,10 @@ export default function SimulationPage() {
   useEffect(() => {
     interruptedLaneRef.current = interruptedLane;
   }, [interruptedLane]);
+
+  useEffect(() => {
+    interruptedRemainingTimeRef.current = interruptedRemainingTime;
+  }, [interruptedRemainingTime]);
 
   useEffect(() => {
     timeRemainingRef.current = timeRemaining;
@@ -165,41 +185,73 @@ export default function SimulationPage() {
 
     const syncLiveCounts = async () => {
       try {
-        const dataCounts = await fetchLiveCounts();
-        const countsArray = dataCounts || [0, 0, 0, 0];
-        if (cancelled) {
-          return;
-        }
-
-        const mappedCounts = {
-          north: Number(countsArray[0] || 0),
-          south: Number(countsArray[1] || 0),
-          east: Number(countsArray[2] || 0),
-          west: Number(countsArray[3] || 0),
-        };
-
-        console.log('STATE:', mappedCounts);
-        setBackendCounts(mappedCounts);
+        const dataCounts = await fetchLiveCounts(sessionId);
+        if (cancelled) return;
+        setBackendCounts(dataCounts);
       } catch (err) {
         if (!cancelled) {
-          setBackendCounts({
-            north: 0,
-            south: 0,
-            east: 0,
-            west: 0
-          });
+          setBackendCounts({ north: 0, south: 0, east: 0, west: 0 });
         }
       }
     };
 
-    syncLiveCounts();
-    const interval = setInterval(syncLiveCounts, 1000);
+    syncLiveCounts(); // Initial load
+
+    if (!sessionId) return;
+
+    const ws = new WebSocket(`ws://localhost:8000/ws/simulation/${sessionId}`);
+
+    ws.onopen = () => {
+      console.log("✅ WebSocket connected:", sessionId);
+    };
+
+    ws.onmessage = (event) => {
+      console.log("WS RECEIVED:", event.data);
+      const data = JSON.parse(event.data);
+
+      let raw = data?.lane_counts;
+      let counts = { north: 0, south: 0, east: 0, west: 0 };
+      if (Array.isArray(raw)) {
+        counts = {
+          north: Number(raw[0] || 0),
+          south: Number(raw[1] || 0),
+          east: Number(raw[2] || 0),
+          west: Number(raw[3] || 0)
+        };
+      }
+
+      if (!cancelled) {
+        setBackendCounts(counts);
+        if (data.active_lane) {
+          updateLightStates(data.active_lane);
+          setCurrentGreenLane(data.active_lane);
+
+          // Fix: Update plannedDuration from backend adaptive decision
+          // RULE: Cannot extend or change duration if already in Yellow Phase
+          if (data.duration && !isYellowPhaseRef.current) {
+            setPlannedDuration(Number(data.duration));
+            setPhaseStartTick(tickCount);
+          }
+        }
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error("❌ WebSocket error:", err);
+    };
+
+    ws.onclose = () => {
+      console.warn("⚠️ WebSocket closed. Reconnecting...");
+      setTimeout(() => {
+        if (!cancelled) window.location.reload();
+      }, 2000);
+    };
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      ws.close();
     };
-  }, [mode]);
+  }, [mode, sessionId]);
 
   useEffect(() => {
     console.log('CURRENT MODE:', mode);
@@ -242,11 +294,7 @@ export default function SimulationPage() {
   async function runTick() {
     if (!tickingRef.current) return;
 
-    // In video mode, Adaptive Traffic Management decisions are produced by the backend video pipeline.
-    // Skip frontend simulation ticks to avoid posting stale/empty local lane counts.
-    if (mode === 'video') {
-      return;
-    }
+    console.log("TIMER UPDATE", timeRemainingRef.current);
 
     try {
       if (timeRemainingRef.current <= 0) {
@@ -274,6 +322,11 @@ export default function SimulationPage() {
           emergencyLaneRef.current = detected;
           setInterruptedLane(activeGreenLane);
           interruptedLaneRef.current = activeGreenLane;
+          
+          // CONTEXT SAVE: Save how much green time was left for this lane
+          const remaining = Math.max(0, plannedDurationRef.current - elapsedTimeBeforeScan);
+          setInterruptedRemainingTime(remaining);
+          interruptedRemainingTimeRef.current = remaining;
 
           if (!isYellowPhaseRef.current) {
             setIsYellowPhase(true);
@@ -330,12 +383,15 @@ export default function SimulationPage() {
             removedVehiclesThisTick += 1;
             allowedToCross -= 1;
             crossedTimeThisTick += (VEHICLE_TIME_MULTIPLIERS[vehicle.vehicleType] || 1);
+            const crossTime = mode === 'video'
+              ? vehicle.spawnedAt + (Date.now() - (vehicle.realSpawnedAt || Date.now()))
+              : Date.now();
             logEvent({
               eventType: 'vehicle_crossed',
               vehicleId: vehicle.vehicleId,
               vehicleType: vehicle.vehicleType,
               laneId: vehicle.laneId,
-              timestamp: Date.now(),
+              timestamp: crossTime,
               payload: {}
             });
           } else {
@@ -415,7 +471,50 @@ export default function SimulationPage() {
             for (const v of (lanesAfterCross[activeGreenLane] || [])) {
               currentVehiclesTime += (VEHICLE_TIME_MULTIPLIERS[v.vehicleType] || 1);
             }
-            target = Math.max(Math.min(currentVehiclesTime + crossedTimeThisPhaseRef.current, MAX_GREEN), MIN_GREEN);
+            // Math formula as fallback
+            const cfg = controllerConfigRef.current;
+            const mathFallback = Math.max(
+              Math.min(currentVehiclesTime + crossedTimeThisPhaseRef.current, cfg.max_green),
+              cfg.min_green
+            );
+
+            // Build traffic state for model
+            const waitTimes = {};
+            for (const lane of LANE_ORDER) {
+              const vehicles = lanesAfterCross[lane] || [];
+              const totalWait = vehicles.reduce((acc, v) => acc + Math.max(0, (Date.now() - (v.spawnedAt || Date.now())) / 1000), 0);
+              waitTimes[lane] = vehicles.length > 0 ? totalWait / vehicles.length : 0;
+            }
+            const ambulanceState = {};
+            for (const lane of LANE_ORDER) {
+              ambulanceState[lane] = (lanesAfterCross[lane] || []).some(v => v.vehicleType === 'ambulance');
+            }
+
+            // Non-blocking model call — updates planned duration when resolved
+            getModelDuration(
+              {
+                lane_counts: laneCounts,
+                wait_times: waitTimes,
+                ambulance: ambulanceState,
+                current_lane: activeGreenLane,
+                elapsed_time: elapsedTime,
+              },
+              mathFallback
+            ).then(modelTarget => {
+              // Respect LLM-configured max/min from controllerConfigRef
+              const bounded = Math.max(
+                controllerConfigRef.current.min_green,
+                Math.min(controllerConfigRef.current.max_green, modelTarget)
+              );
+              // C6: Only update if yellow phase has NOT started
+              if (!isYellowPhaseRef.current && plannedDurationRef.current !== bounded) {
+                setPlannedDuration(bounded);
+                plannedDurationRef.current = bounded;
+              }
+            });
+
+            // Apply math fallback immediately (model will override when ready)
+            target = mathFallback;
             if (plannedDurationRef.current !== target) { setPlannedDuration(target); plannedDurationRef.current = target; }
           }
 
@@ -445,9 +544,39 @@ export default function SimulationPage() {
             }
           }
           applyLaneSwitch(newLane, simulatedTick, duration);
+
+          // Async: fetch LLM explanation for this lane switch (non-blocking)
+          (() => {
+            const waitTimes = {};
+            const ambulanceState = {};
+            for (const lane of LANE_ORDER) {
+              const vehicles = lanesAfterCross[lane] || [];
+              const totalWait = vehicles.reduce((acc, v) => acc + Math.max(0, (Date.now() - (v.spawnedAt || Date.now())) / 1000), 0);
+              waitTimes[lane] = vehicles.length > 0 ? totalWait / vehicles.length : 0;
+              ambulanceState[lane] = vehicles.some(v => v.vehicleType === 'ambulance');
+            }
+            explainDecision(
+              { lane_counts: laneCounts, wait_times: waitTimes, ambulance: ambulanceState, current_lane: activeGreenLane },
+              duration
+            ).then(explanation => {
+              if (explanation) {
+                const entry = { lane: activeGreenLane, duration, explanation, timestamp: Date.now() };
+                setLatestExplanation(entry);
+                setExplanationLog(prev => [entry, ...prev].slice(0, 10));
+              }
+            });
+          })();
+
           setIsYellowPhase(false);
           isYellowPhaseRef.current = false;
-          const nextDuration = initialCyclesDoneRef.current < 3 ? INITIAL_CYCLE_TIME : MIN_GREEN;
+
+          let nextDuration = initialCyclesDoneRef.current < 3 ? INITIAL_CYCLE_TIME : MIN_GREEN;
+
+          // We use local dynamic queue-clearing duration logic directly
+          if (mode === 'video' && initialCyclesDoneRef.current >= 3) {
+            nextDuration = MIN_GREEN; // Will be scaled up dynamically by target recalculation
+          }
+
           setPlannedDuration(nextDuration);
           plannedDurationRef.current = nextDuration;
           setCrossedThisPhase(0);
@@ -459,6 +588,16 @@ export default function SimulationPage() {
             emergencyPhaseRef.current = null;
             setEmergencyLane(null);
             emergencyLaneRef.current = null;
+            
+            // Apply Restored Timer if we were interrupted
+            if (interruptedRemainingTimeRef.current > 0) {
+              const restoredTime = Math.max(MIN_GREEN, interruptedRemainingTimeRef.current);
+              setPlannedDuration(restoredTime);
+              plannedDurationRef.current = restoredTime;
+              setInterruptedRemainingTime(0);
+              interruptedRemainingTimeRef.current = 0;
+            }
+
             setInterruptedLane(null);
             interruptedLaneRef.current = null;
           }
@@ -508,10 +647,18 @@ export default function SimulationPage() {
     tickingRef.current = true;
   }
 
+  function handleConfigUpdate(params) {
+    console.log('LLM Config Update:', params);
+    controllerConfigRef.current = {
+      ...controllerConfigRef.current,
+      ...params
+    };
+  }
+
   useEffect(() => {
     let interval = null;
 
-    if (status === 'running' && mode !== 'video') {
+    if (status === 'running') {
       tickingRef.current = true;
       interval = setInterval(runTick, 1000);
     } else {
@@ -531,6 +678,8 @@ export default function SimulationPage() {
   }, [status, navigate]);
 
   function handleAddVehicle(laneId, vehicleType) {
+    if (mode === 'video') return;
+
     const vehicleId = generateVehicleId(vehicleType, laneId);
 
     const vehicle = {
@@ -556,7 +705,70 @@ export default function SimulationPage() {
   // --- AUTOMATED DEMO MODE START ---
   // This logic only runs if ?demo=true is in the URL!
   // Manual mode at standard /simulation is completely unaffected.
+  // Periodic State Sync for Video Mode
   useEffect(() => {
+    if (mode !== 'video' || status !== 'running' || !sessionId) return;
+
+    const syncInterval = setInterval(async () => {
+      const currentLaneCounts = {
+        north: (lanes['north'] || []).length,
+        south: (lanes['south'] || []).length,
+        east: (lanes['east'] || []).length,
+        west: (lanes['west'] || []).length,
+      };
+
+      try {
+        await submitEventLog(sessionId, [{
+          eventType: 'state_sync',
+          timestamp: Date.now(),
+          payload: { lane_counts: currentLaneCounts }
+        }]);
+      } catch (err) {
+        console.warn('Failed to sync state to backend:', err);
+      }
+    }, 2000);
+
+    return () => clearInterval(syncInterval);
+  }, [mode, status, sessionId, lanes]);
+
+  useEffect(() => {
+    if (mode !== 'video' || status !== 'running') return;
+
+    console.log("🎬 [PLAYBACK] Starting video schedule playback...");
+
+    // Create a local copy to track which events have fired
+    const schedule = [...videoSchedule].map(e => ({ ...e, fired: false }));
+    const startTime = Date.now();
+
+    const interval = setInterval(() => {
+      const elapsedMs = Date.now() - startTime;
+
+      schedule.forEach(event => {
+        if (!event.fired && event.timestamp <= elapsedMs) {
+          event.fired = true;
+
+          const vehicle = {
+            vehicleId: event.vehicleId,
+            vehicleType: event.vehicleType,
+            laneId: event.laneId,
+            spawnedAt: event.timestamp,
+            realSpawnedAt: Date.now(),
+            position: 0
+          };
+
+          logEvent(event);
+          addVehicleToLane(vehicle, event.laneId);
+        }
+      });
+
+      if (timeRemainingRef.current <= 0) clearInterval(interval);
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [mode, status, videoSchedule]);
+
+  useEffect(() => {
+    if (mode === 'video') return;
     if (isAutoRunMode && status === 'setup') {
       console.log("[Auto Run] Initializing automated setup...");
       setTimer(180);
@@ -583,22 +795,24 @@ export default function SimulationPage() {
     let spawnInterval = null;
     let emergencyInterval = null;
 
+    if (mode === 'video') return;
+
     if (isAutoRunMode && status === 'running') {
       if (scenarioMode === 'master') {
         const schedule = [
           // 1. Initialization (0-40s)
-          { t: 3000, drops: Array(2).fill({lane: 'north', type: 'car'}) },
-          { t: 8000, drops: Array(5).fill({lane: 'west', type: 'bike'}) }, 
+          { t: 3000, drops: Array(2).fill({ lane: 'north', type: 'car' }) },
+          { t: 8000, drops: Array(5).fill({ lane: 'west', type: 'bike' }) },
           // Prep for Dynamic Scaling (North getting loaded before cycle 5)
-          { t: 25000, drops: Array(8).fill({lane: 'north', type: 'car'}) },
+          { t: 25000, drops: Array(8).fill({ lane: 'north', type: 'car' }) },
           // 2. Dynamic Upscaling in Green Phase (Drop at 43s, extends North's target)
-          { t: 43000, drops: Array(2).fill({lane: 'north', type: 'bus'}) },
+          { t: 43000, drops: Array(2).fill({ lane: 'north', type: 'bus' }) },
           // 3. Yellow Phase Freezing (Drop at 53s during Yellow lock, forces queueing)
-          { t: 53000, drops: Array(4).fill({lane: 'north', type: 'car'}) },
+          { t: 53000, drops: Array(4).fill({ lane: 'north', type: 'car' }) },
           // 4. Instant Preemption (Drop ambulance in South while West is actively green)
-          { t: 62000, drops: [{lane: 'south', type: 'ambulance'}] },
+          { t: 62000, drops: [{ lane: 'south', type: 'ambulance' }] },
           // 5. Normal traffic resumes heavily just to prove resumption works
-          { t: 80000, drops: Array(5).fill({lane: 'east', type: 'car'}) }
+          { t: 80000, drops: Array(5).fill({ lane: 'east', type: 'car' }) }
         ];
 
         const startTime = Date.now();
@@ -661,7 +875,7 @@ export default function SimulationPage() {
   function LaneCard({ laneId }) {
     const isActive = lightStates[laneId] === 'green';
     const vehicles = lanes[laneId] || [];
-    const count = mode === 'video' ? Number(backendCounts[laneId] || 0) : vehicles.length;
+    const count = vehicles.length;
 
     const isThisLaneYellow = isActive && isYellowPhase;
     const timeToSwitch = Math.max(0, plannedDuration - (tickCount - phaseStartTick));
@@ -685,6 +899,7 @@ export default function SimulationPage() {
             <button
               key={type}
               className="vehicle-icon-btn"
+              disabled={mode === 'video'}
               onClick={() => handleAddVehicle(laneId, type)}
             >
               {VEHICLE_ICONS[type]}
@@ -713,8 +928,12 @@ export default function SimulationPage() {
 
       <main className="content">
         <header className="content-header">
-          <h1>Traffic Control Simulation</h1>
-          <p>Manage lane vehicles and monitor live Adaptive Traffic Management decisions</p>
+          <h1>{mode === 'video' ? 'Video Analysis Dashboard' : 'Traffic Control Simulation'}</h1>
+          <p>
+            {mode === 'video'
+              ? 'Monitoring live traffic metrics from processed video stream'
+              : 'Manage lane vehicles and monitor live Adaptive Traffic Management decisions'}
+          </p>
         </header>
 
         <Section className="simulation-topbar">
@@ -728,65 +947,77 @@ export default function SimulationPage() {
           </Button>
         </Section>
 
-        <Section title="Simulation Progress">
-          <progress className="progress-bar" value={timerPercent} max={100} />
-        </Section>
+        <div className="simulation-layout">
+          <div className="simulation-main-col">
+            <Section title="Simulation Progress">
+              <progress className="progress-bar" value={timerPercent} max={100} />
+            </Section>
 
-        {emergencyPhase && (
-          <Section className={`status-banner status-warning emergency-banner-${emergencyPhase}`}>
-            {emergencyPhase === 'pre-empting' && <h3 style={{ color: 'white', margin: 0 }}>🚨 Emergency Vehicle Detected in {String(emergencyLane).toUpperCase()}! Switching in {Math.max(0, plannedDuration - (tickCount - phaseStartTick))}s</h3>}
-            {emergencyPhase === 'active' && <h3 style={{ color: 'white', margin: 0 }}>🚑 Emergency Override Active for {String(emergencyLane).toUpperCase()}. Waiting for vehicle to pass...</h3>}
-            {emergencyPhase === 'recovering' && <h3 style={{ color: 'white', margin: 0 }}>✅ Emergency Cleared! Resuming normal cycle in {Math.max(0, plannedDuration - (tickCount - phaseStartTick))}s...</h3>}
-          </Section>
-        )}
+            {emergencyPhase && (
+              <Section className={`status-banner status-warning emergency-banner-${emergencyPhase}`}>
+                {emergencyPhase === 'pre-empting' && <h3 style={{ color: 'white', margin: 0 }}>🚨 Emergency Vehicle Detected in {String(emergencyLane).toUpperCase()}! Switching in {Math.max(0, plannedDuration - (tickCount - phaseStartTick))}s</h3>}
+                {emergencyPhase === 'active' && <h3 style={{ color: 'white', margin: 0 }}>🚑 Emergency Override Active for {String(emergencyLane).toUpperCase()}. Waiting for vehicle to pass...</h3>}
+                {emergencyPhase === 'recovering' && <h3 style={{ color: 'white', margin: 0 }}>✅ Emergency Cleared! Resuming normal cycle in {Math.max(0, plannedDuration - (tickCount - phaseStartTick))}s...</h3>}
+              </Section>
+            )}
 
-        <section className="lane-grid">
-          {LANE_ORDER.map(laneId => (
-            <LaneCard key={laneId} laneId={laneId} />
-          ))}
-        </section>
+            <section className="lane-grid">
+              {LANE_ORDER.map(laneId => (
+                <LaneCard key={laneId} laneId={laneId} />
+              ))}
+            </section>
 
-        <Section title="Actual Signal Durations (Simulation)">
-          {displayedSignalPhases.length === 0 ? (
-            <p className="muted-text">No signal phases recorded yet.</p>
-          ) : (
-            <div className="table-wrap">
-              <table className="decision-table">
-                <thead>
-                  <tr>
-                    <th>Lane</th>
-                    <th className="align-right">Actual Duration (s)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayedSignalPhases.map((phase, index) => (
-                    <tr key={`${phase.lane}-${index}`}>
-                      <td>{String(phase.lane || '--').toUpperCase()}</td>
-                      <td className="align-right">
-                        {Number(phase.duration || 0).toFixed(1)}
-                        {phase.active ? ' (active)' : ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Section>
+            <Section title="Actual Signal Durations (Simulation)">
+              {displayedSignalPhases.length === 0 ? (
+                <p className="muted-text">No signal phases recorded yet.</p>
+              ) : (
+                <div className="table-wrap">
+                  <table className="decision-table">
+                    <thead>
+                      <tr>
+                        <th>Lane</th>
+                        <th className="align-right">Actual Duration (s)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {displayedSignalPhases.map((phase, index) => (
+                        <tr key={`${phase.lane}-${index}`}>
+                          <td>{String(phase.lane || '--').toUpperCase()}</td>
+                          <td className="align-right">
+                            {Number(phase.duration || 0).toFixed(1)}
+                            {phase.active ? ' (active)' : ''}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
 
+            {status === 'setup' && (
+              <Section title="Setup & Intelligence Configuration">
+                <TimerControl />
+                <div style={{ marginTop: '2rem' }}>
+                  <LLMConfigBox onConfigUpdate={handleConfigUpdate} />
+                </div>
+              </Section>
+            )}
 
+            {status === 'placement' && (
+              <Section>
+                <div style={{ marginBottom: '2rem' }}>
+                  <LLMConfigBox onConfigUpdate={handleConfigUpdate} />
+                </div>
+                <Button onClick={handleStart}>Start Simulation</Button>
+              </Section>
+            )}
+          </div>
 
-        {status === 'setup' && (
-          <Section title="Setup Timer">
-            <TimerControl />
-          </Section>
-        )}
-
-        {status === 'placement' && (
-          <Section>
-            <Button onClick={handleStart}>Start Simulation</Button>
-          </Section>
-        )}
+          <div className="simulation-sidebar-col">
+            <LLMExplanationPanel explanationLog={explanationLog} />
+          </div>
+        </div>
       </main>
     </div>
   );

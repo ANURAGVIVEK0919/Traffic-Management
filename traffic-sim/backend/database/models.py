@@ -1,4 +1,6 @@
 
+
+import json
 from .db import get_connection  # Import connection function
 
 def create_tables():
@@ -58,9 +60,25 @@ def create_tables():
 			FOREIGN KEY (session_id) REFERENCES simulation_session(id)
 		)
 	""")
+
+	# Table 5: shared_state (for lane counts, timer, etc.)
+	cursor.execute("""
+		CREATE TABLE IF NOT EXISTS shared_state (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	""")
 	cursor.execute("""
 		CREATE INDEX IF NOT EXISTS idx_simulation_decision_log_session
 		ON simulation_decision_log (session_id)
 	""")
 	conn.commit()
+
+	# Initialize default shared state if not present
+	cursor.execute("SELECT COUNT(*) FROM shared_state")
+	if cursor.fetchone()[0] == 0:
+		cursor.execute("INSERT INTO shared_state (key, value) VALUES (?, ?)", ("lane_counts", json.dumps([0,0,0,0])))
+		cursor.execute("INSERT INTO shared_state (key, value) VALUES (?, ?)", ("timer", json.dumps(0)))
+		conn.commit()
+
 	conn.close()

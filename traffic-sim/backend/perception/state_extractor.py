@@ -1,4 +1,5 @@
 from collections import defaultdict
+DEBUG = False
 from pathlib import Path
 import math
 import copy
@@ -7,11 +8,12 @@ import json
 import cv2
 import numpy as np
 
-from backend.agent.yolo_detector import detect_vehicles_in_frame, reset_tracking_state
+from backend.agent.yolo_detector import detect_vehicles_in_frame, reset_tracking_state, VEHICLE_CLASSES
 from backend.perception.video_pipeline import load_config
+from backend.perception.lane_processing import normalize_lane_regions
 
 LANES = ("north", "south", "east", "west")
-ALLOWED_CLASSES = {"car", "truck", "bus", "bike"}
+ALLOWED_CLASSES = VEHICLE_CLASSES
 BEST_CONFIG_PATH = Path(__file__).resolve().parents[0] / "config" / "best_config.json"
 
 CONFIG = {
@@ -52,10 +54,10 @@ def _load_best_config():
         merged = dict(BEST_CONFIG)
         if isinstance(loaded, dict):
             merged.update(loaded)
-        print("LOADED BEST CONFIG:", merged)
+        if DEBUG: print("LOADED BEST CONFIG:", merged)
         return merged
     except Exception as exc:
-        print(f"[CONFIG WARNING] Failed to load {BEST_CONFIG_PATH}: {exc}")
+        if DEBUG: print(f"[CONFIG WARNING] Failed to load {BEST_CONFIG_PATH}: {exc}")
         return dict(BEST_CONFIG)
 
 
@@ -64,9 +66,9 @@ def _save_best_config(cfg):
         BEST_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(BEST_CONFIG_PATH, "w", encoding="utf-8") as handle:
             json.dump(cfg, handle, indent=2)
-        print("SAVED BEST CONFIG:", cfg)
+        if DEBUG: print("SAVED BEST CONFIG:", cfg)
     except Exception as exc:
-        print(f"[CONFIG WARNING] Failed to save {BEST_CONFIG_PATH}: {exc}")
+        if DEBUG: print(f"[CONFIG WARNING] Failed to save {BEST_CONFIG_PATH}: {exc}")
 
 
 CONFIG = _load_best_config()
@@ -116,17 +118,18 @@ def smooth_series(values, window):
 def analyze_counts(lane_counts_per_frame):
     for lane in LANES:
         values = list(lane_counts_per_frame.get(lane, []))
-        print(f"\nLANE: {lane}")
-        if not values:
-            print("Min:", 0)
-            print("Max:", 0)
-            print("Mean:", 0.0)
-            print("Std:", 0.0)
-            continue
-        print("Min:", float(np.min(values)))
-        print("Max:", float(np.max(values)))
-        print("Mean:", float(np.mean(values)))
-        print("Std:", float(np.std(values)))
+        if DEBUG:
+            print(f"\nLANE: {lane}")
+            if not values:
+                print("Min:", 0)
+                print("Max:", 0)
+                print("Mean:", 0.0)
+                print("Std:", 0.0)
+                continue
+            print("Min:", float(np.min(values)))
+            print("Max:", float(np.max(values)))
+            print("Mean:", float(np.mean(values)))
+            print("Std:", float(np.std(values)))
 
 
 def compute_quality_score(lane_counts_per_frame, final_counts):
@@ -234,9 +237,10 @@ def _extract_with_config(video_path, config_path, seconds_to_process, cfg):
     all_confidences = []
     total_detections_seen = 0
 
-    print("FRAME SKIP:", cfg["frame_skip"])
-    print("MIN TRACK FRAMES:", cfg["min_track_frames"])
-    print("MOVEMENT THRESHOLD:", movement_threshold)
+    if DEBUG:
+        print("FRAME SKIP:", cfg["frame_skip"])
+        print("MIN TRACK FRAMES:", cfg["min_track_frames"])
+        print("MOVEMENT THRESHOLD:", movement_threshold)
 
     reset_tracking_state()
 
@@ -349,16 +353,18 @@ def _extract_with_config(video_path, config_path, seconds_to_process, cfg):
 
         lane_counts[lane] = max(0, int(final_count))
 
-        print("RAW FRAME COUNTS:", raw_counts)
-        print("FILTERED COUNTS:", filtered_counts)
-        print("FINAL COUNT:", lane_counts[lane])
+        if DEBUG:
+            print("RAW FRAME COUNTS:", raw_counts)
+            print("FILTERED COUNTS:", filtered_counts)
+            print("FINAL COUNT:", lane_counts[lane])
 
-    print("TRACK DURATIONS:", dict(track_frame_count))
-    print("TRACK MOVEMENTS:", track_movement)
-    print("LANE VOTES:", {track_id: dict(votes) for track_id, votes in lane_votes.items()})
-    print("LANE VEHICLES:", {lane: sorted(list(ids)) for lane, ids in lane_vehicles.items()})
-    print("STATE_EXTRACTOR lane_counts:", lane_counts)
-    print("FINAL COUNTS:", lane_counts)
+    if DEBUG:
+        print("TRACK DURATIONS:", dict(track_frame_count))
+        print("TRACK MOVEMENTS:", track_movement)
+        print("LANE VOTES:", {track_id: dict(votes) for track_id, votes in lane_votes.items()})
+        print("LANE VEHICLES:", {lane: sorted(list(ids)) for lane, ids in lane_vehicles.items()})
+        print("STATE_EXTRACTOR lane_counts:", lane_counts)
+        print("FINAL COUNTS:", lane_counts)
     analyze_counts(lane_counts_per_frame)
 
     tuned_cfg = _auto_tune_config(lane_counts_per_frame, lane_counts, cfg)
@@ -371,24 +377,27 @@ def _extract_with_config(video_path, config_path, seconds_to_process, cfg):
         frame_width,
     )
     if tuned_cfg != cfg:
-        print("AUTO-TUNE SUGGESTION:", tuned_cfg)
+        if DEBUG: print("AUTO-TUNE SUGGESTION:", tuned_cfg)
 
-    print("EXPECTED VS DETECTED (manual check needed)")
     quality_score = compute_quality_score(lane_counts_per_frame, lane_counts)
-    print("FINAL CONFIG USED:", cfg)
-    print("FINAL LANE COUNTS:", lane_counts)
-    print("QUALITY SCORE:", quality_score)
-    print("DEBUG ----")
-    print("TOTAL DETECTIONS:", total_detections_seen)
-    print("VALID TRACKS:", len(valid_tracks))
-    print("LANE VEHICLES:", lane_vehicles)
-    print("FINAL LANE COUNTS:", lane_counts)
-    final_lane_counts_list = [int(lane_counts.get(lane, 0) or 0) for lane in LANES]
-    print("FINAL LANE COUNTS:", final_lane_counts_list)
-    root_cause, diagnosis_lines = diagnose_root_cause(total_detections_seen, valid_tracks, lane_vehicles, lane_counts)
-    print(f"ROOT CAUSE: {root_cause}")
-    for line in diagnosis_lines[:3]:
-        print(line)
+
+    if DEBUG:
+        print("EXPECTED VS DETECTED (manual check needed)")
+        print("FINAL CONFIG USED:", cfg)
+        print("FINAL LANE COUNTS:", lane_counts)
+        print("QUALITY SCORE:", quality_score)
+    if DEBUG:
+        print("DEBUG ----")
+        print("TOTAL DETECTIONS:", total_detections_seen)
+        print("VALID TRACKS:", len(valid_tracks))
+        print("LANE VEHICLES:", lane_vehicles)
+        print("FINAL LANE COUNTS:", lane_counts)
+        final_lane_counts_list = [int(lane_counts.get(lane, 0) or 0) for lane in LANES]
+        print("FINAL LANE COUNTS:", final_lane_counts_list)
+        root_cause, diagnosis_lines = diagnose_root_cause(total_detections_seen, valid_tracks, lane_vehicles, lane_counts)
+        print(f"ROOT CAUSE: {root_cause}")
+        for line in diagnosis_lines[:3]:
+            print(line)
 
     return {
         "lane_vehicles": {lane: sorted(list(ids)) for lane, ids in lane_vehicles.items()},
@@ -500,40 +509,126 @@ def run_parameter_sweep(video_path, config_path=None, seconds_to_process=3.0):
     sweep_results = []
     for override in sweeps:
         cfg = _merged_config(override)
-        print("\n================ PARAMETER SWEEP ================")
-        print("SWEEP CONFIG:", cfg)
+        if DEBUG:
+            print("\n================ PARAMETER SWEEP ================")
+            print("SWEEP CONFIG:", cfg)
         result = _extract_with_config(video_path, config_path, seconds_to_process, cfg)
         lane_counts = result.get("lane_counts", {})
         lane_counts_per_frame = result.get("lane_counts_per_frame", {})
         score = compute_quality_score(lane_counts_per_frame, lane_counts)
         sweep_results.append({"config": cfg, "lane_counts": lane_counts, "score": float(score)})
-        print("SWEEP RESULT COUNTS:", lane_counts)
-        print("SWEEP RESULT SCORE:", float(score))
+        if DEBUG:
+            print("SWEEP RESULT COUNTS:", lane_counts)
+            print("SWEEP RESULT SCORE:", float(score))
 
-    print("\n================ SWEEP SUMMARY ================")
-    for item in sweep_results:
-        print("CONFIG:", item["config"])
-        print("COUNTS:", item["lane_counts"])
-        print("SCORE:", item["score"])
+    if DEBUG:
+        print("\n================ SWEEP SUMMARY ================")
+        for item in sweep_results:
+            print("CONFIG:", item["config"])
+            print("COUNTS:", item["lane_counts"])
+            print("SCORE:", item["score"])
 
     best = max(sweep_results, key=lambda x: x.get("score", float("-inf"))) if sweep_results else None
     if best is not None:
-        print("BEST CONFIG:", best["config"])
-        print("BEST SCORE:", best["score"])
+        if DEBUG:
+            print("BEST CONFIG:", best["config"])
+            print("BEST SCORE:", best["score"])
         CONFIG = dict(best["config"])
         _save_best_config(CONFIG)
 
-    print("\nPARAMETER GUIDANCE:")
-    print("- movement_ratio too low -> noise, too high -> misses")
-    print("- min_track_frames too low -> noise, too high -> misses")
-    print("- confidence_threshold too low -> false positives, too high -> misses")
-    print("- frame_skip too low -> noise, too high -> misses")
-    print("- lane_vote_threshold too low -> wrong lane, too high -> missing assignments")
+    if DEBUG:
+        print("\nPARAMETER GUIDANCE:")
+        print("- movement_ratio too low -> noise, too high -> misses")
+        print("- min_track_frames too low -> noise, too high -> misses")
+        print("- confidence_threshold too low -> false positives, too high -> misses")
+        print("- frame_skip too low -> noise, too high -> misses")
+        print("- lane_vote_threshold too low -> wrong lane, too high -> missing assignments")
 
     if best is not None:
-        print("FINAL CONFIG USED:", CONFIG)
-        print("FINAL LANE COUNTS:", best["lane_counts"])
-        print("QUALITY SCORE:", best["score"])
+        if DEBUG:
+            print("FINAL CONFIG USED:", CONFIG)
+            print("FINAL LANE COUNTS:", best["lane_counts"])
+            print("QUALITY SCORE:", best["score"])
 
-    print("EXPECTED VS DETECTED (manual check needed)")
+    if DEBUG: print("EXPECTED VS DETECTED (manual check needed)")
     return sweep_results
+
+
+def extract_full_pipeline_data(video_path, config_path):
+    """
+    Step 1 of the 3-Step Process:
+    Scans the entire video and generates a schedule of vehicle arrivals.
+    """
+    if config_path:
+        config = load_config(Path(config_path))
+        raw_lane_regions = config.get("lane_regions", {})
+        lane_regions = normalize_lane_regions(raw_lane_regions)
+    else:
+        lane_regions = {}
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    events = []
+    seen_tracks = set()
+    
+    # Use standard config for scanning
+    cfg = _load_best_config()
+    reset_tracking_state()
+    
+    print(f"🎬 [PRE-PROCESS] Starting full scan of {total_frames} frames...")
+    
+    frame_index = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+        
+        # Sample every 5 frames (approx 5 FPS) to speed up pre-processing
+        # but still catch most vehicles
+        if frame_index % 5 == 0:
+            current_time = frame_index / max(fps, 1e-6)
+            
+            # Use the detector but ignore counts, we only want the track info
+            _, detections = detect_vehicles_in_frame(
+                frame, 
+                lane_regions, 
+                return_debug=True,
+                current_time=current_time,
+                active_green_lane=None
+            )
+            
+            for det in detections or []:
+                track_id = det.get("track_id")
+                confidence = float(det.get("confidence", 0.0))
+                label = str(det.get("label", "")).lower()
+                
+                # Basic filtering
+                if track_id is not None and track_id not in seen_tracks:
+                    if confidence >= float(cfg.get("confidence_threshold", 0.35)) and label in ALLOWED_CLASSES:
+                        lane = str(det.get("lane", "")).lower()
+                        if lane in LANES:
+                            seen_tracks.add(track_id)
+                            events.append({
+                                "eventType": "vehicle_added",
+                                "vehicleId": f"video-{lane}-{track_id}",
+                                "vehicleType": label,
+                                "laneId": lane,
+                                "timestamp": int(current_time * 1000), # milliseconds for frontend
+                                "payload": {"source": "video_pre_processor"}
+                            })
+        
+        frame_index += 1
+        if frame_index % 100 == 0:
+            print(f"⏳ [PRE-PROCESS] Scanned {frame_index}/{total_frames} frames...")
+
+    cap.release()
+    print(f"✅ [PRE-PROCESS] Scan complete. Found {len(events)} vehicle arrivals.")
+    
+    return {
+        "events": events,
+        "video_duration": total_frames / max(fps, 1e-6)
+    }

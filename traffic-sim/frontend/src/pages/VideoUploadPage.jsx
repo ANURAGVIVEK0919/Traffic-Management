@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { uploadVideo, startVideoJob, getJobStatus } from '../services/api';
 import { useSimulationStore } from '../state/simulationStore';
@@ -10,7 +10,9 @@ import './dashboard.css';
 export default function VideoUploadPage() {
   const setTimer = useSimulationStore((state) => state.setTimer);
   const resetStore = useSimulationStore((state) => state.resetStore);
-  const setSessionIdStore = useSimulationStore((state) => state.setSessionId);
+  // const setSessionIdStore = useSimulationStore((state) => state.setSessionId); // removed duplicate
+const setSessionId = useSimulationStore((state) => state.setSessionId);
+  const setVideoSchedule = useSimulationStore((state) => state.setVideoSchedule);
   const setMode = useSimulationStore((state) => state.setMode);
   const updateVehiclePositions = useSimulationStore((state) => state.updateVehiclePositions);
   const setTotalVehiclesCrossed = useSimulationStore((state) => state.setTotalVehiclesCrossed);
@@ -19,7 +21,7 @@ export default function VideoUploadPage() {
   const startSimulation = useSimulationStore((state) => state.startSimulation);
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [sessionId, setSessionId] = useState(null);
+  const [localSessionId, setLocalSessionId] = useState(null);
   const [videoPath, setVideoPath] = useState(null);
   const [jobStarted, setJobStarted] = useState(false);
   const [jobStatus, setJobStatus] = useState(null);
@@ -28,7 +30,10 @@ export default function VideoUploadPage() {
   const intervalRef = useRef(null);
   const navigate = useNavigate();
 
-  function emptyLanes() {
+  // Prevent automatic store reset when this page unmounts after a video run.
+  // The store already holds the correct mode and sessionId.
+  useEffect(() => () => {}, []);
+function emptyLanes() {
     return { north: [], east: [], south: [], west: [] };
   }
 
@@ -89,7 +94,7 @@ export default function VideoUploadPage() {
         setUploading(false);
         return;
       }
-      setSessionId(resolvedSessionId);
+      setLocalSessionId(resolvedSessionId);
       setVideoPath(result.video_path);
       setMode('video');
     } catch (err) {
@@ -100,11 +105,11 @@ export default function VideoUploadPage() {
 
   const handleStartJob = async () => {
     try {
-      await startVideoJob(sessionId, videoPath);
+      await startVideoJob(localSessionId, videoPath);
       setJobStarted(true);
       intervalRef.current = setInterval(async () => {
         try {
-          const status = await getJobStatus(sessionId);
+          const status = await getJobStatus(localSessionId);
           setJobStatus(status);
           setProgress(status.progress || 0);
           if (status.status === 'completed' || status.status === 'failed') {
@@ -142,7 +147,7 @@ export default function VideoUploadPage() {
             />
           </div>
 
-          {!sessionId && (
+          {!localSessionId && (
             <Button
               onClick={handleUpload}
               disabled={!selectedFile || uploading}
@@ -151,9 +156,9 @@ export default function VideoUploadPage() {
             </Button>
           )}
 
-          {sessionId && !jobStarted && (
+          {localSessionId && !jobStarted && (
             <div className="status-stack">
-              <p className="muted-text">Upload successful. Session: {sessionId.slice(0, 8)}...</p>
+              <p className="muted-text">Upload successful. Session: {localSessionId.slice(0, 8)}...</p>
               <Button onClick={handleStartJob}>Start Processing</Button>
             </div>
           )}
@@ -173,18 +178,19 @@ export default function VideoUploadPage() {
                       return;
                     }
 
-                    const timerDuration = Number(jobStatus.timer_duration || 60);
+                    const videoDuration = Number(jobStatus.video_duration || 180);
                     const seededLanes = normalizeSimulationLanes(jobStatus.simulation_state);
 
                     resetStore();
-                    setTimer(timerDuration);
+                    setTimer(videoDuration);
                     setSessionId(resolvedSessionId);
-                    setSessionIdStore(resolvedSessionId);
                     setMode('video');
                     setSignalPhases([]);
                     setTotalVehiclesCrossed(0);
                     updateVehiclePositions(seededLanes);
                     logSeedEvents(seededLanes);
+                    setVideoSchedule(jobStatus.video_events || []);
+                    useSimulationStore.getState().setVideoDuration(videoDuration);
                     startSimulation();
                     navigate('/');
                   }}

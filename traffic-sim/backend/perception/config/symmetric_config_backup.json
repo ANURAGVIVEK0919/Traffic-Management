@@ -1,0 +1,143 @@
+{
+  "name": "symmetric-junction",
+  "timer_duration": 120,
+  "settings": {
+    "min_avg_confidence": 0.1,
+    "max_count_jump": 3,
+    "confidence_hold_ticks": 1
+  },
+  "lane_regions": {
+    "north": {
+      "id": "north",
+      "label": "north",
+      "direction": "incoming",
+      "polygon": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          1920.0,
+          0.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ],
+      "points": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          1920.0,
+          0.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ]
+    },
+    "south": {
+      "id": "south",
+      "label": "south",
+      "direction": "incoming",
+      "polygon": [
+        [
+          0.0,
+          1080.0
+        ],
+        [
+          1920.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ],
+      "points": [
+        [
+          0.0,
+          1080.0
+        ],
+        [
+          1920.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ]
+    },
+    "east": {
+      "id": "east",
+      "label": "east",
+      "direction": "incoming",
+      "polygon": [
+        [
+          1920.0,
+          0.0
+        ],
+        [
+          1920.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ],
+      "points": [
+        [
+          1920.0,
+          0.0
+        ],
+        [
+          1920.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ]
+    },
+    "west": {
+      "id": "west",
+      "label": "west",
+      "direction": "incoming",
+      "polygon": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ],
+      "points": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1080.0
+        ],
+        [
+          960.0,
+          540.0
+        ]
+      ]
+    }
+  }
+}
