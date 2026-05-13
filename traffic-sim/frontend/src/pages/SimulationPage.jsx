@@ -58,6 +58,8 @@ export default function SimulationPage() {
   const [emergencyLane, setEmergencyLane] = useState(null);
   const [interruptedLane, setInterruptedLane] = useState(null);
   const [interruptedRemainingTime, setInterruptedRemainingTime] = useState(0);
+  const [v2iBeacons, setV2IBeacons] = useState([]);
+  const [v2iAlertLane, setV2IAlertLane] = useState(null);
 
   const status = useSimulationStore(state => state.status);
   const mode = useSimulationStore(state => state.mode);
@@ -106,6 +108,7 @@ export default function SimulationPage() {
   const emergencyLaneRef = useRef(emergencyLane);
   const interruptedLaneRef = useRef(interruptedLane);
   const interruptedRemainingTimeRef = useRef(0);
+  const v2iAlertLaneRef = useRef(null);
 
   // LLM-configurable controller params (set via LLMConfigBox)
   const controllerConfigRef = useRef({
@@ -135,6 +138,10 @@ export default function SimulationPage() {
   useEffect(() => {
     interruptedRemainingTimeRef.current = interruptedRemainingTime;
   }, [interruptedRemainingTime]);
+
+  useEffect(() => {
+    v2iAlertLaneRef.current = v2iAlertLane;
+  }, [v2iAlertLane]);
 
   useEffect(() => {
     timeRemainingRef.current = timeRemaining;
@@ -253,6 +260,32 @@ export default function SimulationPage() {
     };
   }, [mode, sessionId]);
 
+  // V2I Hub Polling
+  useEffect(() => {
+    if (status !== 'running') return;
+
+    const pollV2I = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/v2i/active');
+        const active = await response.json();
+        setV2IBeacons(active);
+
+        if (active.length > 0) {
+          // Find the most urgent beacon
+          const urgent = [...active].sort((a, b) => a.eta - b.eta)[0];
+          setV2IAlertLane(urgent.lane);
+        } else {
+          setV2IAlertLane(null);
+        }
+      } catch (err) {
+        console.warn('V2I Hub polling failed:', err);
+      }
+    };
+
+    const interval = setInterval(pollV2I, 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
   useEffect(() => {
     console.log('CURRENT MODE:', mode);
   }, [mode]);
@@ -315,6 +348,13 @@ export default function SimulationPage() {
             break;
           }
         }
+        
+        // V2I EARLY WARNING: If V2I detects an ambulance before camera sees it
+        if (!detected && v2iAlertLaneRef.current && v2iAlertLaneRef.current !== activeGreenLane) {
+          detected = v2iAlertLaneRef.current;
+          console.log(`📡 V2I EARLY WARNING: Pre-empting for ${detected.toUpperCase()}`);
+        }
+
         if (detected) {
           setEmergencyPhase('pre-empting');
           emergencyPhaseRef.current = 'pre-empting';
@@ -429,7 +469,9 @@ export default function SimulationPage() {
           }
         } else if (emergencyPhaseRef.current === 'active') {
           const hasAmbulance = lanesAfterCross[activeGreenLane].some(v => v.vehicleType === 'ambulance');
-          if (!hasAmbulance && elapsedTime >= MIN_GREEN) {
+          const hasV2IAlert = v2iAlertLaneRef.current === activeGreenLane;
+          
+          if (!hasAmbulance && !hasV2IAlert && elapsedTime >= MIN_GREEN) {
             setEmergencyPhase('recovering');
             emergencyPhaseRef.current = 'recovering';
             if (!isYellowPhaseRef.current) {
@@ -702,6 +744,24 @@ export default function SimulationPage() {
     addVehicleToLane(vehicle, laneId);
   }
 
+  async function handleTriggerV2I(laneId) {
+    try {
+      await fetch('http://localhost:8000/v2i/beacon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicle_id: `V2I-AMB-${Math.floor(Math.random() * 1000)}`,
+          lane: laneId,
+          distance: 400.0,
+          speed: 15.0
+        })
+      });
+      console.log(`📡 Triggered V2I beacon for ${laneId}`);
+    } catch (err) {
+      console.error('Failed to trigger V2I beacon:', err);
+    }
+  }
+
   // --- AUTOMATED DEMO MODE START ---
   // This logic only runs if ?demo=true is in the URL!
   // Manual mode at standard /simulation is completely unaffected.
@@ -961,6 +1021,34 @@ export default function SimulationPage() {
               </Section>
             )}
 
+            {v2iBeacons.length > 0 && (
+              <Section title="🛰️ V2I Emergency Radar (Master Hub)" className="v2i-radar-section">
+                <div className="v2i-beacons-list">
+                  {v2iBeacons.map(beacon => (
+                    <div key={beacon.vehicle_id} className="v2i-beacon-item">
+                      <div className="v2i-beacon-info">
+                        <span className="v2i-beacon-id">📡 {beacon.vehicle_id}</span>
+                        <span className="v2i-beacon-lane">{beacon.lane.toUpperCase()}</span>
+                      </div>
+                      <div className="v2i-beacon-stats">
+                        <div className="v2i-stat">
+                          <label>Distance</label>
+                          <span>{Math.round(beacon.distance)}m</span>
+                        </div>
+                        <div className="v2i-stat">
+                          <label>ETA</label>
+                          <span className="v2i-eta-highlight">{beacon.eta}s</span>
+                        </div>
+                      </div>
+                      <div className="v2i-progress">
+                        <div className="v2i-progress-fill" style={{ width: `${Math.max(0, (1 - beacon.distance / 500) * 100)}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
+
             <section className="lane-grid">
               {LANE_ORDER.map(laneId => (
                 <LaneCard key={laneId} laneId={laneId} />
@@ -1000,6 +1088,16 @@ export default function SimulationPage() {
                 <TimerControl />
                 <div style={{ marginTop: '2rem' }}>
                   <LLMConfigBox onConfigUpdate={handleConfigUpdate} />
+                </div>
+                <div style={{ marginTop: '2rem' }}>
+                  <h3>Simulate Digital Beacon (V2I)</h3>
+                  <div className="v2i-trigger-grid">
+                    {LANE_ORDER.map(lane => (
+                      <Button key={lane} variant="secondary" onClick={() => handleTriggerV2I(lane)}>
+                        📡 {lane.toUpperCase()}
+                      </Button>
+                    ))}
+                  </div>
                 </div>
               </Section>
             )}

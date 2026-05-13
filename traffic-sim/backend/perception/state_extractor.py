@@ -554,7 +554,7 @@ def run_parameter_sweep(video_path, config_path=None, seconds_to_process=3.0):
     return sweep_results
 
 
-def extract_full_pipeline_data(video_path, config_path):
+def extract_full_pipeline_data(video_path, config_path, progress_callback=None):
     """
     Step 1 of the 3-Step Process:
     Scans the entire video and generates a schedule of vehicle arrivals.
@@ -623,7 +623,10 @@ def extract_full_pipeline_data(video_path, config_path):
         
         frame_index += 1
         if frame_index % 100 == 0:
-            print(f"⏳ [PRE-PROCESS] Scanned {frame_index}/{total_frames} frames...")
+            progress = int((frame_index / total_frames) * 100)
+            if progress_callback:
+                progress_callback(progress)
+            print(f"⏳ [PRE-PROCESS] Scanned {frame_index}/{total_frames} frames ({progress}%)...")
 
     cap.release()
     print(f"✅ [PRE-PROCESS] Scan complete. Found {len(events)} vehicle arrivals.")

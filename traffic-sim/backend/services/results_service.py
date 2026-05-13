@@ -368,7 +368,12 @@ def get_simulation_results(session_id):
         elif row[0] == "static":
             static_row = result
     if not dynamic_row and not static_row:
-        return {"error": "Results not found", "dynamic": _safe_result(None), "static": _safe_result(None)}
+        return {
+            "error": "Results not found", 
+            "dynamic": _safe_result(None), 
+            "static": _safe_result(None),
+            "actual_signal_log": _build_actual_signal_log(session_id)
+        }
 
     if not dynamic_row and static_row:
         dynamic_row = static_row.copy()

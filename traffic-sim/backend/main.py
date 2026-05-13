@@ -4,6 +4,7 @@ from backend.routers.simulation import router as simulation_router  # Simulation
 from backend.routers.upload import router as upload_router  # Upload router
 from backend.routers.jobs import router as jobs_router  # Jobs router
 from backend.routers.signal import router as signal_router  # Signal AI router
+from backend.routers.v2i import router as v2i_router  # V2I Hub router
 from backend.database.models import create_tables  # DB table setup
 
 app = FastAPI()  # Create FastAPI app
@@ -27,3 +28,4 @@ app.include_router(simulation_router)
 app.include_router(upload_router)
 app.include_router(jobs_router)
 app.include_router(signal_router)
+app.include_router(v2i_router)

@@ -3,6 +3,7 @@
 import threading
 from pathlib import Path
 
+# pyrefly: ignore [missing-import]
 import cv2
 
 from backend.perception.state_extractor import extract_initial_state, extract_full_pipeline_data
@@ -45,7 +46,8 @@ def _run_extractor_in_thread(job_id, video_path, config_path, session_id):
         
         scan_results = extract_full_pipeline_data(
             video_path=video_path,
-            config_path=config_path
+            config_path=config_path,
+            progress_callback=lambda p: job_store[job_id].update({"progress": p})
         )
         
         events = scan_results.get("events", [])

@@ -791,6 +791,114 @@ h3 {
   }
 }
 
+/* V2I Emergency Radar */
+.v2i-radar-section {
+  background: rgba(30, 41, 59, 0.5) !important;
+  border: 1px solid rgba(56, 189, 248, 0.3) !important;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.1);
+}
+
+.v2i-beacons-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.v2i-beacon-item {
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  position: relative;
+  overflow: hidden;
+  animation: slideInRadar 0.3s ease-out;
+}
+
+@keyframes slideInRadar {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.v2i-beacon-info {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.v2i-beacon-id {
+  font-weight: bold;
+  color: var(--primary);
+  font-family: monospace;
+}
+
+.v2i-beacon-lane {
+  background: var(--primary);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: bold;
+}
+
+.v2i-beacon-stats {
+  display: flex;
+  gap: 24px;
+}
+
+.v2i-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.v2i-stat label {
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.v2i-stat span {
+  font-weight: bold;
+  font-size: 1.1rem;
+}
+
+.v2i-eta-highlight {
+  color: #f43f5e;
+  text-shadow: 0 0 8px rgba(244, 63, 94, 0.4);
+}
+
+.v2i-progress {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  margin-top: 12px;
+}
+
+.v2i-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), #38bdf8);
+  border-radius: 2px;
+  transition: width 1s linear;
+}
+
+.v2i-trigger-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.v2i-trigger-grid button {
+  background: rgba(56, 189, 248, 0.1) !important;
+  border: 1px solid rgba(56, 189, 248, 0.2) !important;
+  color: #38bdf8 !important;
+  transition: all 0.2s;
+}
+
+.v2i-trigger-grid button:hover {
+  background: rgba(56, 189, 248, 0.2) !important;
+  transform: translateY(-2px);
+}
+
 /* LLM Integration Styles */
 
 .llm-panel, .llm-config-box {
