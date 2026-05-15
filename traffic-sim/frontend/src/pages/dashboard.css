@@ -754,6 +754,65 @@ h3 {
   border-color: #2563eb !important;
 }
 
+/* V2I Siren Animations */
+.v2i-radar-section {
+  position: relative;
+  overflow: hidden;
+  border: 2px solid rgba(255, 59, 48, 0.3);
+}
+
+.v2i-siren-overlay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.siren-pulse-ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border: 4px solid #ff3b30;
+  border-radius: 50%;
+  animation: siren-pulse 1s infinite ease-out;
+}
+
+.siren-pulse-ring-slow {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border: 2px solid #ff3b30;
+  border-radius: 50%;
+  animation: siren-pulse 2s infinite ease-out;
+}
+
+@keyframes siren-pulse {
+  0% { transform: scale(0.5); opacity: 1; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+.pulse-text {
+  animation: text-flicker 0.5s infinite alternate;
+}
+
+@keyframes text-flicker {
+  from { opacity: 1; text-shadow: 0 0 10px rgba(255, 59, 48, 0.8); }
+  to { opacity: 0.5; text-shadow: 0 0 2px rgba(255, 59, 48, 0.2); }
+}
+
+.siren-bg {
+  background: linear-gradient(90deg, #ff3b30, #ff9500) !important;
+}
+
+.v2i-alert-active {
+  background: rgba(255, 59, 48, 0.05) !important;
+  border-left: 4px solid #ff3b30 !important;
+}
+
 @media (max-width: 900px) {
   .dashboard {
     flex-direction: column;

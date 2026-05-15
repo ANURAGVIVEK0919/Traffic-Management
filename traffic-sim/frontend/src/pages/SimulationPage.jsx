@@ -20,7 +20,7 @@ const LANE_ORDER = ['north', 'east', 'south', 'west'];
 const MIN_GREEN = 8;
 const MAX_GREEN = 30;
 const YELLOW_TIME = 5;
-const INITIAL_CYCLE_TIME = 8;
+const INITIAL_CYCLE_TIME = 10;
 
 const VEHICLE_TIME_MULTIPLIERS = {
   car: 1.0,
@@ -268,6 +268,23 @@ export default function SimulationPage() {
       try {
         const response = await fetch('http://localhost:8000/v2i/active');
         const active = await response.json();
+        
+        // Track crossed (removed) V2I beacons
+        const activeIds = active.map(b => b.vehicle_id);
+        v2iBeacons.forEach(b => {
+          if (!activeIds.includes(b.vehicle_id)) {
+            console.log(`📡 V2I Ambulance ${b.vehicle_id} cleared intersection.`);
+            logEvent({
+              eventType: 'vehicle_crossed',
+              vehicleId: b.vehicle_id,
+              vehicleType: 'ambulance',
+              laneId: b.lane,
+              timestamp: Date.now(),
+              payload: { isVirtual: true }
+            });
+          }
+        });
+
         setV2IBeacons(active);
 
         if (active.length > 0) {
@@ -317,6 +334,18 @@ export default function SimulationPage() {
       phase
     ]);
     addSignalPhase(phase);
+    
+    // Log as event for backend metrics
+    logEvent({
+      eventType: 'signal_phase',
+      laneId: previousLane,
+      timestamp: Date.now(),
+      payload: {
+        lane: previousLane,
+        duration: duration
+      }
+    });
+
     setCurrentGreenLane(newLane);
     currentGreenLaneRef.current = newLane;
     setPhaseStartTick(simulatedTick);
@@ -395,6 +424,7 @@ export default function SimulationPage() {
         crossedTimeThisPhaseRef.current = 0;
       }
 
+      const elapsedTime = Math.max(0, simulatedTick - phaseStartTickRef.current);
       updateLightStates(activeGreenLane);
 
       const updatedLanes = moveVehicles(lanesRef.current, {
@@ -402,13 +432,16 @@ export default function SimulationPage() {
         south: activeGreenLane === 'south' ? 'green' : 'red',
         east: activeGreenLane === 'east' ? 'green' : 'red',
         west: activeGreenLane === 'west' ? 'green' : 'red'
-      });
+      }, elapsedTime);
 
       const lanesAfterCross = { north: [], east: [], south: [], west: [] };
       let removedVehiclesThisTick = 0;
       let crossedTimeThisTick = 0;
 
       for (const lane of LANE_ORDER) {
+        // Implementation of Saturation Flow (C5): 
+        // Even in green, vehicles only cross when they physically reach the intersection.
+        // We allow up to 1 vehicle per second to cross (Saturation flow approximation).
         let allowedToCross = lane === activeGreenLane ? 1 : 0;
 
         for (const vehicle of updatedLanes[lane]) {
@@ -454,7 +487,6 @@ export default function SimulationPage() {
 
       const laneCounts = getLaneCounts(lanesAfterCross);
       const vehicleCount = laneCounts[activeGreenLane] ?? 0;
-      const elapsedTime = Math.max(0, simulatedTick - phaseStartTickRef.current);
 
       let shouldSwitch = false;
       let newLane = activeGreenLane;
@@ -497,11 +529,11 @@ export default function SimulationPage() {
       } else {
         if (initialCyclesDoneRef.current < 4) {
           if (plannedDurationRef.current !== INITIAL_CYCLE_TIME) { setPlannedDuration(INITIAL_CYCLE_TIME); plannedDurationRef.current = INITIAL_CYCLE_TIME; }
-          if (elapsedTime >= INITIAL_CYCLE_TIME - YELLOW_TIME && !isYellowPhaseRef.current) {
+          if (elapsedTime >= INITIAL_CYCLE_TIME && !isYellowPhaseRef.current) {
             setIsYellowPhase(true);
             isYellowPhaseRef.current = true;
           }
-          if (elapsedTime >= INITIAL_CYCLE_TIME) {
+          if (elapsedTime >= INITIAL_CYCLE_TIME + YELLOW_TIME) {
             shouldSwitch = true;
             setInitialCyclesDone(prev => prev + 1);
             initialCyclesDoneRef.current += 1;
@@ -560,11 +592,11 @@ export default function SimulationPage() {
             if (plannedDurationRef.current !== target) { setPlannedDuration(target); plannedDurationRef.current = target; }
           }
 
-          if (elapsedTime >= target - YELLOW_TIME && !isYellowPhaseRef.current) {
+          if (elapsedTime >= target && !isYellowPhaseRef.current) {
             setIsYellowPhase(true);
             isYellowPhaseRef.current = true;
           }
-          if (elapsedTime >= target) {
+          if (elapsedTime >= target + YELLOW_TIME) {
             shouldSwitch = true;
           }
         }
@@ -655,6 +687,7 @@ export default function SimulationPage() {
       }
 
     } catch (err) {
+      console.error("Simulation Tick Error:", err);
     }
   }
 
@@ -746,17 +779,28 @@ export default function SimulationPage() {
 
   async function handleTriggerV2I(laneId) {
     try {
+      const vid = `V2I-AMB-${Math.floor(Math.random() * 1000)}`;
       await fetch('http://localhost:8000/v2i/beacon', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          vehicle_id: `V2I-AMB-${Math.floor(Math.random() * 1000)}`,
+          vehicle_id: vid,
           lane: laneId,
           distance: 400.0,
           speed: 15.0
         })
       });
       console.log(`📡 Triggered V2I beacon for ${laneId}`);
+
+      // Log as virtual vehicle for metrics
+      logEvent({
+        eventType: 'vehicle_added',
+        vehicleId: vid,
+        vehicleType: 'ambulance',
+        laneId: laneId,
+        timestamp: Date.now(),
+        payload: { isVirtual: true }
+      });
     } catch (err) {
       console.error('Failed to trigger V2I beacon:', err);
     }
@@ -1022,26 +1066,30 @@ export default function SimulationPage() {
             )}
 
             {v2iBeacons.length > 0 && (
-              <Section title="🛰️ V2I Emergency Radar (Master Hub)" className="v2i-radar-section">
+              <Section title="🛰️ V2I Emergency GPS Radar (Digital Siren Enabled)" className="v2i-radar-section">
+                <div className="v2i-siren-overlay">
+                  <div className="siren-pulse-ring"></div>
+                  <div className="siren-pulse-ring-slow"></div>
+                </div>
                 <div className="v2i-beacons-list">
                   {v2iBeacons.map(beacon => (
-                    <div key={beacon.vehicle_id} className="v2i-beacon-item">
+                    <div key={beacon.vehicle_id} className="v2i-beacon-item v2i-alert-active">
                       <div className="v2i-beacon-info">
-                        <span className="v2i-beacon-id">📡 {beacon.vehicle_id}</span>
-                        <span className="v2i-beacon-lane">{beacon.lane.toUpperCase()}</span>
+                        <span className="v2i-beacon-id">📡 GPS: {beacon.vehicle_id}</span>
+                        <span className="v2i-beacon-lane">{beacon.lane.toUpperCase()} INTERSECTION APPROACH</span>
                       </div>
                       <div className="v2i-beacon-stats">
                         <div className="v2i-stat">
-                          <label>Distance</label>
+                          <label>Distance (GPS)</label>
                           <span>{Math.round(beacon.distance)}m</span>
                         </div>
                         <div className="v2i-stat">
-                          <label>ETA</label>
-                          <span className="v2i-eta-highlight">{beacon.eta}s</span>
+                          <label>Siren ETA</label>
+                          <span className="v2i-eta-highlight pulse-text">{beacon.eta}s</span>
                         </div>
                       </div>
                       <div className="v2i-progress">
-                        <div className="v2i-progress-fill" style={{ width: `${Math.max(0, (1 - beacon.distance / 500) * 100)}%` }} />
+                        <div className="v2i-progress-fill siren-bg" style={{ width: `${Math.max(0, (1 - beacon.distance / 500) * 100)}%` }} />
                       </div>
                     </div>
                   ))}
@@ -1083,21 +1131,24 @@ export default function SimulationPage() {
               )}
             </Section>
 
+            {(status === 'setup' || status === 'running') && (
+              <Section title="🚨 Emergency Intervention (V2I Simulation)">
+                <p className="muted-text">Simulate an Ambulance approaching from 400m via GPS/Siren Beacon:</p>
+                <div className="v2i-trigger-grid">
+                  {LANE_ORDER.map(lane => (
+                    <Button key={lane} variant="secondary" onClick={() => handleTriggerV2I(lane)}>
+                      📡 {lane.toUpperCase()} (400m)
+                    </Button>
+                  ))}
+                </div>
+              </Section>
+            )}
+
             {status === 'setup' && (
-              <Section title="Setup & Intelligence Configuration">
+              <Section title="Intelligence Configuration">
                 <TimerControl />
                 <div style={{ marginTop: '2rem' }}>
                   <LLMConfigBox onConfigUpdate={handleConfigUpdate} />
-                </div>
-                <div style={{ marginTop: '2rem' }}>
-                  <h3>Simulate Digital Beacon (V2I)</h3>
-                  <div className="v2i-trigger-grid">
-                    {LANE_ORDER.map(lane => (
-                      <Button key={lane} variant="secondary" onClick={() => handleTriggerV2I(lane)}>
-                        📡 {lane.toUpperCase()}
-                      </Button>
-                    ))}
-                  </div>
                 </div>
               </Section>
             )}

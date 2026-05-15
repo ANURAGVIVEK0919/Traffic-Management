@@ -6,9 +6,9 @@ from pathlib import Path
 # pyrefly: ignore [missing-import]
 import cv2
 
-from backend.perception.state_extractor import extract_initial_state, extract_full_pipeline_data
-from backend.perception.video_pipeline import run_pipeline
-from backend.services.simulation_service import create_session
+from backend.ai.perception.state_extractor import extract_initial_state, extract_full_pipeline_data
+from backend.ai.perception.video_pipeline import run_pipeline
+from backend.core.services.simulation_service import create_session
 
 job_store = {}
 
@@ -35,8 +35,8 @@ def _safe_video_stats(video_path: str):
 
 
 def _run_extractor_in_thread(job_id, video_path, config_path, session_id):
-    from backend.services.simulation_service import save_event_log, save_simulation_results
-    from backend.services.static_replay_service import compute_dynamic_metrics, compute_static_metrics
+    from backend.core.services.simulation_service import save_event_log, save_simulation_results
+    from backend.core.services.static_replay_service import compute_dynamic_metrics, compute_static_metrics
     try:
         job_store[job_id]["status"] = "running"
 
@@ -77,7 +77,7 @@ def _run_extractor_in_thread(job_id, video_path, config_path, session_id):
         job_store[job_id]["error_message"] = str(exc)
 
 async def run_video_pipeline_job(job_id, video_path):
-    from backend.services.simulation_service import ensure_session_exists
+    from backend.core.services.simulation_service import ensure_session_exists
     if job_id not in job_store:
         job_store[job_id] = _pending_job_state()
     job_store[job_id]["job_id"] = job_id
