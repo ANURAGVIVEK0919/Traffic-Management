@@ -139,6 +139,13 @@ def get_latest_results(session_id: str = Query(None)):
         print(f"[API] fetch session={session_id} PID={os.getpid()}")
     return data
 
+@router.get("/simulation/live-counts/{id}")
+def get_live_counts(id: str):
+    data = handle_get_latest_results(id)
+    counts = data.get('lane_counts', [0, 0, 0, 0])
+    print(f"📡 [API LIVE COUNTS] session={id} counts={counts}")
+    return counts
+
 
 @router.get("/simulation/results")
 def get_results_compare(

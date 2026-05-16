@@ -191,11 +191,12 @@ function emptyLanes() {
                     logSeedEvents(seededLanes);
                     setVideoSchedule(jobStatus.video_events || []);
                     useSimulationStore.getState().setVideoDuration(videoDuration);
-                    startSimulation();
-                    navigate('/');
+                    
+                    // Direct redirect to Dashboard
+                    navigate(`/dashboard/${resolvedSessionId}`);
                   }}
                 >
-                  Start Simulation
+                  View Results Dashboard
                 </Button>
               )}
 

@@ -563,8 +563,8 @@ def extract_full_pipeline_data(video_path, config_path, progress_callback=None):
     video_hash = get_video_hash(video_path)
     cached = get_video_events(video_hash)
     if cached:
-        print(f"📦 [CACHE] Found pre-scanned events for video: {video_hash}. Instant start!")
-        return cached
+        print(f"📦 [CACHE] Found pre-scanned events for video: {video_hash}. FORCING RESCAN due to metric updates!")
+        # return cached  # Temporarily disabled to force a rescan
 
     if config_path:
         config = load_config(Path(config_path))

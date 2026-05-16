@@ -60,6 +60,7 @@ def resolve_session_id(identifier):
 # Handle event log submission and metrics computation
 def handle_submit_log(session_id, events):
     import os
+    from backend.core.services.results_service import get_events_for_session
     try:
         session_id = resolve_session_id(session_id)
         if DEBUG:
@@ -81,12 +82,15 @@ def handle_submit_log(session_id, events):
         conn.close()
         timer_duration = row[0] if row else 0
 
-        dynamic_results = compute_dynamic_metrics(events, timer_duration)
-        static_results = compute_static_metrics(events, timer_duration)
+        # ✅ FIX: Compute metrics from ALL session events (not just current batch)
+        # This ensures correct incremental results throughout the video pipeline
+        all_session_events = get_events_for_session(session_id)
+        dynamic_results = compute_dynamic_metrics(all_session_events, timer_duration)
+        static_results = compute_static_metrics(all_session_events, timer_duration)
         
-        if DEBUG: print(f"[CONTROLLER] dynamic results calculated")
+        if DEBUG: print(f"[CONTROLLER] metrics from {len(all_session_events)} total events")
 
-        # Correct extraction from raw events (Source of truth)
+        # Extract latest lane state for WebSocket broadcast
         lane_counts = [0, 0, 0, 0]
         active_lane = "north"
         duration = 5
@@ -122,7 +126,6 @@ def handle_submit_log(session_id, events):
                     "duration": duration
                 }
                 latest_results['lane_counts'] = counts # legacy fallback
-                print(f"[MEMORY STATE] {latest_results}")
                 print(f"[MEMORY] session={session_id} counts={counts}")
 
         except Exception as e:
@@ -134,6 +137,7 @@ def handle_submit_log(session_id, events):
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 
 # Handle result retrieval
@@ -176,20 +180,17 @@ def handle_get_results_compare(rl_id, static_id):
 def handle_get_latest_results(session_id=None):
     import os
     try:
-        state = {"lane_counts": [0, 0, 0, 0], "active_lane": None}
+        from backend.infra.database.shared_state import get_lane_counts
+        db_counts = get_lane_counts()
+        
+        state = {"lane_counts": db_counts, "active_lane": "north"}
+        
         with latest_results_lock:
-            if DEBUG:
-                print(f"[MEMORY] full state dump (PID: {os.getpid()})")
-                print(f"[MEMORY] fetch session={session_id}")
+            # Also check if there's a more specific session state in memory
             if session_id and session_id in latest_results:
                 val = latest_results[session_id]
                 if isinstance(val, dict):
-                    state = val
-                else:
-                    state = {"lane_counts": val, "active_lane": None}
-            else:
-                counts = latest_results.get('lane_counts', [0, 0, 0, 0])
-                state = {"lane_counts": counts, "active_lane": None}
+                    state = {**val, "lane_counts": db_counts}
 
         if DEBUG: print(f"[API] Returning latest state: {state}")
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 
-from backend.perception.lane_processing import LANE_ORDER, make_lane_region, resize_polygon, region_points
+from backend.ai.perception.lane_processing import LANE_ORDER, make_lane_region, resize_polygon, region_points
 
 
 def draw_text(frame, lane_index):
@@ -197,7 +197,7 @@ def run_calibration(video_path, output_path, timer_duration):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calibrate polygon lane ROIs from first video frame')
     parser.add_argument('--video', required=True, help='Path to video file')
-    parser.add_argument('--output', default='backend/perception/config/junction_demo.json', help='Output json config path')
+    parser.add_argument('--output', default='backend/ai/perception/config/junction_demo.json', help='Output json config path')
     parser.add_argument('--timer-duration', type=int, default=120, help='Timer duration in seconds for prototype run')
     args = parser.parse_args()
 

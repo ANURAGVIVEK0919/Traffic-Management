@@ -31,13 +31,14 @@ def reconstruct_vehicle_timeline(parsed_events):
 	timeline = {'north': [], 'south': [], 'east': [], 'west': []}
 	for event in parsed_events:
 		if event.get('eventType') == 'vehicle_added':
-			lane_id = event.get('laneId') or event.get('lane_id')
-			if lane_id and lane_id in timeline:
+			lane_id = str(event.get('laneId') or event.get('lane_id') or '').lower()
+			if lane_id in timeline:
 				ts = event.get('timestamp')
 				arrived_at = ts / 1000 if ts and ts > 1000000000000 else ts
 				timeline[lane_id].append({
 					'vehicleId': event.get('vehicleId'),
 					'vehicleType': event.get('vehicleType'),
-					'arrivedAt': arrived_at
+					'arrivedAt': arrived_at,
+					'payload': event.get('payload', {})
 				})
 	return timeline

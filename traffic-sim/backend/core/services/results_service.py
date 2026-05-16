@@ -370,14 +370,37 @@ def get_simulation_results(session_id):
 
     # Fetch decision logs once to avoid multiple DB queries
     decision_logs = get_decision_logs(session_id)
-    actual_signal_log = [
-        {
-            "lane": log.get("selected_lane") or log.get("lane"),
-            "duration": log.get("duration"),
-        }
-        for log in decision_logs
-    ]
+    # Extract individual signal phases from the event log for the dashboard table
+    all_events = get_events_for_session(session_id)
+    actual_signal_log = []
+    for e in all_events:
+        if isinstance(e, dict) and e.get('eventType') == 'signal_phase':
+            payload = e.get('payload', {})
+            lane = e.get('laneId') or payload.get('lane')
+            dur = payload.get('duration') or e.get('duration')
+            if lane and dur:
+                actual_signal_log.append({
+                    "lane": str(lane).upper(),
+                    "duration": round(float(dur), 1)
+                })
     
+    # If no signal_phase events, fallback to decision logs (summed)
+    if not actual_signal_log:
+        lane_totals = {}
+        for log in decision_logs:
+            lane = str((log.get("selected_lane") or log.get("lane") or "")).lower()
+            try:
+                dur = float(log.get("duration", 0) or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            if lane in ("north", "south", "east", "west"):
+                lane_totals[lane] = lane_totals.get(lane, 0.0) + dur
+
+        actual_signal_log = [
+            {"lane": lane.upper(), "duration": round(dur, 1)}
+            for lane, dur in lane_totals.items()
+        ]
+
     signal_phases = []
     for log in reversed(decision_logs):
         snapshot = log.get('snapshot', {})

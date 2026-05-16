@@ -1,0 +1,75 @@
+{
+  "session_id": "6b533ef6-9c3b-41f2-a187-fa64a672ed46",
+  "v2i_test": {
+    "injected": true,
+    "active_seconds": 40,
+    "lane": "east",
+    "vehicle_id": "V2I-AMB-TEST-001",
+    "beacon_count": 20,
+    "stopped": true
+  },
+  "sessionId": "6b533ef6-9c3b-41f2-a187-fa64a672ed46",
+  "dynamic": {
+    "avg_wait_time": 8.132393103448274,
+    "total_vehicles_crossed": 273.0,
+    "co2_estimate": 18.70450413793103,
+    "avg_green_utilization": 92.0,
+    "ambulance_avg_wait_time": 8.488000000000003,
+    "lane_state": {
+      "north": 0,
+      "south": 0,
+      "east": 0,
+      "west": 0
+    }
+  },
+  "static": {
+    "avg_wait_time": 305.3626791290664,
+    "total_vehicles_crossed": 279.0,
+    "co2_estimate": 702.3341619968527,
+    "avg_green_utilization": 54.64583333333335,
+    "ambulance_avg_wait_time": 167.57419400000586,
+    "lane_state": {
+      "north": 0,
+      "south": 0,
+      "east": 0,
+      "west": 0
+    }
+  },
+  "actual_signal_log": [
+    {
+      "lane": "north",
+      "duration": 9179.8
+    }
+  ],
+  "signal_phases": [],
+  "benchmark": {
+    "wins": {
+      "dynamic": 4,
+      "static": 1,
+      "tie": 0,
+      "n/a": 0
+    },
+    "uplift": {
+      "total_vehicles_crossed": {
+        "winner": "static",
+        "uplift_pct": -2.1505376344086025
+      },
+      "co2_estimate": {
+        "winner": "dynamic",
+        "uplift_pct": 97.33680843820112
+      },
+      "avg_wait_time": {
+        "winner": "dynamic",
+        "uplift_pct": 97.33680843820112
+      },
+      "ambulance_avg_wait_time": {
+        "winner": "dynamic",
+        "uplift_pct": 94.9347809484319
+      },
+      "avg_green_utilization": {
+        "winner": "dynamic",
+        "uplift_pct": 68.3568433091879
+      }
+    }
+  }
+}

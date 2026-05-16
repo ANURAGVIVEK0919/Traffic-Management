@@ -17,8 +17,8 @@ import './dashboard.css';
 
 const VEHICLE_TYPES = ['car', 'bike', 'ambulance', 'truck', 'bus'];
 const LANE_ORDER = ['north', 'east', 'south', 'west'];
-const MIN_GREEN = 8;
-const MAX_GREEN = 30;
+const MIN_GREEN = 5;
+const MAX_GREEN = 25;
 const YELLOW_TIME = 5;
 const INITIAL_CYCLE_TIME = 10;
 
@@ -191,18 +191,31 @@ export default function SimulationPage() {
     let cancelled = false;
 
     const syncLiveCounts = async () => {
+      if (!sessionId) return;
       try {
-        const dataCounts = await fetchLiveCounts(sessionId);
-        if (cancelled) return;
-        setBackendCounts(dataCounts);
-      } catch (err) {
-        if (!cancelled) {
-          setBackendCounts({ north: 0, south: 0, east: 0, west: 0 });
+        const response = await fetch(`http://localhost:8000/simulation/live-counts/${sessionId}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (cancelled) return;
+          // Support both array [N,S,E,W] and object {north, south...}
+          if (Array.isArray(data)) {
+            setBackendCounts({
+              north: data[0] || 0,
+              south: data[1] || 0,
+              east: data[2] || 0,
+              west: data[3] || 0
+            });
+          } else {
+            setBackendCounts(data);
+          }
         }
+      } catch (err) {
+        console.warn("Polling failed:", err);
       }
     };
 
-    syncLiveCounts(); // Initial load
+    syncLiveCounts();
+    const pollInterval = setInterval(syncLiveCounts, 3000); // Fallback poll every 3s
 
     if (!sessionId) return;
 
@@ -257,6 +270,7 @@ export default function SimulationPage() {
     return () => {
       cancelled = true;
       ws.close();
+      clearInterval(pollInterval);
     };
   }, [mode, sessionId]);
 
@@ -981,6 +995,9 @@ export default function SimulationPage() {
     const vehicles = lanes[laneId] || [];
     const count = vehicles.length;
 
+    // Use backend perception counts in video mode, otherwise use 2D simulation state
+    const displayCount = mode === 'video' ? (backendCounts[laneId] || 0) : count;
+    
     const isThisLaneYellow = isActive && isYellowPhase;
     const timeToSwitch = Math.max(0, plannedDuration - (tickCount - phaseStartTick));
 
@@ -994,7 +1011,7 @@ export default function SimulationPage() {
         </div>
 
         <div className="lane-stats-wrap">
-          <p className="lane-count">{count} Waiting</p>
+          <p className="lane-count">{displayCount} Waiting</p>
           {isActive ? <p className="lane-crossed">{crossedThisPhase} Crossed This Phase</p> : null}
         </div>
 
@@ -1043,7 +1060,7 @@ export default function SimulationPage() {
         <Section className="simulation-topbar">
           <div className="timer-chip">
             <span>Time Remaining</span>
-            <strong>{timeRemaining}s</strong>
+            <strong>{Number(timeRemaining || 0).toFixed(1)}s</strong>
           </div>
 
           <Button variant="secondary" onClick={() => navigate('/upload')}>

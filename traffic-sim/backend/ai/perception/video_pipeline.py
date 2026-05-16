@@ -13,6 +13,14 @@ import requests
 
 from backend.infra.shared_memory import latest_results, latest_results_lock
 from backend.ai.perception.detector import detect_vehicles_in_frame, get_lane, reset_lane_wait_timer, reset_tracking_state
+from backend.ai.perception.lane_processing import (
+    normalize_lane_regions,
+    draw_lane_polygons,
+    point_in_region,
+    region_points,
+    polygon_to_cv2,
+    compute_polygon_center,
+)
 from backend.ai.perception.homography import (
     HomographyLaneMapper,
     compute_homography,
@@ -65,7 +73,8 @@ def is_valid_region(region):
 
 
 def load_config(config_path):
-    data = normalize_lane_config(config_path)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
     lane_regions = data.get('lane_regions', {})
     normalized_lane_regions = normalize_lane_regions(lane_regions)
     for lane in ('north', 'east', 'south', 'west'):
@@ -1087,6 +1096,16 @@ class SimpleVehicleTracker:
                 }
             )
 
+        # Include lane+label for new tracks so vehicle_added events have correct laneId
+        new_tracks_data = {
+            track_id: {
+                'lane': self.tracked_objects[track_id].get('lane'),
+                'label': self.tracked_objects[track_id].get('label'),
+            }
+            for track_id in new_track_ids
+            if track_id in self.tracked_objects
+        }
+
         return {
             'raw_counts': raw_counts,
             'smoothed_counts': smoothed_counts,
@@ -1096,6 +1115,7 @@ class SimpleVehicleTracker:
             'queue_length_by_direction': queue_length_by_direction,
             'tracked_detections': tracked_detections,
             'new_track_ids': new_track_ids,
+            'new_tracks_data': new_tracks_data,   # lane+label for event emission
             'crossed_track_ids': crossed_track_ids,
             'removed_track_ids': removed_track_ids,
             'tracked_count': len(self.tracked_objects),
@@ -1290,9 +1310,11 @@ def run_pipeline(
     smooth_alpha=0.6,
     session_id=None,
     select_homography_points=False,
+    realtime=True,
+    on_progress=None,
 ):
     video_hash = get_video_hash(video_path)
-    cached_data = get_cached_video_data(video_hash) if is_video_cached(video_hash) else None
+    cached_data = None # get_cached_video_data(video_hash) if is_video_cached(video_hash) else None
     if cached_data:
         print(f"📦 [CACHE] Found pre-processed data for video: {video_hash}. Skipping YOLO.")
     
@@ -1318,13 +1340,10 @@ def run_pipeline(
     frame_delta_time = 1.0 / fps
 
     timer_duration = config.get('timer_duration') or estimate_timer_duration(video_path)
-    if DEBUG:
-        if session_id:
-            print(f"PIPELINE session_id: {session_id}")
-        else:
-            session = post_json(f"{base_url}/simulation/start", {'timer_duration': int(timer_duration)})
-            session_id = session['session_id']
-            print(f"PIPELINE session_id: {session_id}")
+    if not session_id:
+        session = post_json(f"{base_url}/simulation/start", {'timer_duration': int(timer_duration)})
+        session_id = session['session_id']
+    print(f"[PIPELINE] session_id={session_id}, timer_duration={timer_duration}s")
 
     if DEBUG:
         print(f"[PIPELINE SESSION] {session_id}")
@@ -1347,8 +1366,9 @@ def run_pipeline(
     active_green_lane = None
     phase_start_time = 0.0
     signal_phases = []
-    v2i_seen_ids = set() # Track V2I IDs already added as vehicles
-    v2i_active_ids = set() # Track V2I IDs currently present
+    v2i_seen_ids = set()
+    v2i_active_ids = set()
+    _last_progress_report = 0  # track last progress % reported
 
     detect_width = 640
     detect_height = 360
@@ -1573,14 +1593,31 @@ def run_pipeline(
 
     try:
         while True:
+            if not realtime and sample_every_n > 1:
+                # ⚡ BATCH MODE: Jump directly to next sample frame
+                # Instead of reading every frame, seek to every Nth frame
+                # This is ~sample_every_n x faster (e.g. 6x for 5fps from 30fps video)
+                target_frame = frame_index
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+
             ok, frame = cap.read()
             if not ok:
                 break
 
-            if frame_index % 30 == 0:
-                print(f"[PIPELINE] running frame={frame_index}")
+            if frame_index % 150 == 0:
+                elapsed = time.time() - (run_start_ms / 1000)
+                pct = int((frame_index / max(total_frames, 1)) * 100)
+                print(f"[PIPELINE] frame={frame_index}/{total_frames} ({pct}%) elapsed={elapsed:.0f}s")
 
             current_time = frame_index / fps
+
+            # ── Progress reporting ──────────────────────────────────────────
+            if on_progress is not None and total_frames > 0:
+                _current_progress = min(99, int((frame_index / total_frames) * 100))
+                if _current_progress > _last_progress_report:
+                    _last_progress_report = _current_progress
+                    on_progress(_current_progress)
+
             with shared_lock:
                 shared_state['latest_frame'] = frame.copy()
                 shared_state['latest_frame_seq'] = frame_index
@@ -1591,7 +1628,7 @@ def run_pipeline(
                 live_detections = shared_state['latest_detections']
 
             # --- CACHE LOGIC: READ OR WRITE ---
-            if cached_data and frame_index in cache_map:
+            if False and cached_data and frame_index in cache_map: # Disabled to force fresh metric recalculation
                 c = cache_map[frame_index]
                 last_lane_state = {
                     lane: {
@@ -1746,7 +1783,7 @@ def run_pipeline(
                         active_beacons = v2i_resp.json()
                         current_v2i_ids = set()
                         for beacon in active_beacons:
-                            vid = beacon.get('vehicle_id')
+                            vid = beacon.get('vehicle_id') or beacon.get('vehicleId')
                             if not vid: continue
                             current_v2i_ids.add(vid)
                             
@@ -1762,7 +1799,11 @@ def run_pipeline(
                                         "vehicleId": vid,
                                         "vehicleType": "ambulance",
                                         "laneId": b_lane,
-                                        "timestamp": run_start_ms + int(current_time * 1000)
+                                        "timestamp": run_start_ms + int(current_time * 1000),
+                                        "payload": {
+                                            "initial_distance": beacon.get('distance', 400.0),
+                                            "speed_limit": beacon.get('speed', 15.0)
+                                        }
                                     })
                         
                         # Handle crossed (removed) V2I beacons
@@ -1807,7 +1848,7 @@ def run_pipeline(
                 # Append a lane_state event so backend can compute metrics
                 events.append({
                     "eventType": "rl_decision",
-                    "timestamp": current_time,
+                    "timestamp": int(current_time * 1000),
                     "payload": {
                         "snapshot": {
                             "lane_state": lane_state_snapshot,
@@ -1875,7 +1916,19 @@ def run_pipeline(
                     low_confidence_streak = 0
                     detections_for_overlay = detections
 
-                lane_state = last_lane_state
+                # ✅ FIX: Build lane_state from ACTUAL tracker data (not zeros)
+                # lane_state_raw has current vehicle counts per lane from the tracker
+                if lane_state_raw:
+                    lane_state = {
+                        lane: {
+                            'count': lane_state_raw.get(lane, {}).get('count', 0),
+                            'hasAmbulance': lane_state_raw.get(lane, {}).get('hasAmbulance', False),
+                            'avgWaitTime': wait_time_by_direction.get(lane, 0.0),
+                        }
+                        for lane in ('north', 'east', 'south', 'west')
+                    }
+                else:
+                    lane_state = last_lane_state
 
                 if DEBUG:
                     print("Vehicles crossed:", last_tracked_detection_result['total_vehicles_crossed'])
@@ -1902,32 +1955,28 @@ def run_pipeline(
 
                 print("RL DECISION:", decision)
 
-                next_green_lane = decision.get('lane') if isinstance(decision, dict) else None
-                if next_green_lane != active_green_lane:
+                next_green_lane = (decision.get('lane') if isinstance(decision, dict) else decision) or active_green_lane
+                phase_duration = max(0.0, float(current_time) - float(phase_start_time))
+
+                # Log if lane switched OR if we've been on the same lane for > 60s
+                if next_green_lane != active_green_lane or phase_duration >= 60.0:
                     if active_green_lane is not None:
-                        phase_duration = max(0.0, float(current_time) - float(phase_start_time))
-                        signal_phases.append(
-                            {
-                                'lane': str(active_green_lane),
-                                'duration': float(phase_duration),
-                            }
-                        )
-                        events.append(
-                            {
-                                'eventType': 'signal_phase',
-                                'laneId': str(active_green_lane),
-                                'timestamp': run_start_ms + int(current_time * 1000),
-                                'payload': {
-                                    'lane': str(active_green_lane),
-                                    'duration': float(phase_duration),
-                                },
-                            }
-                        )
-                    print(f"SWITCHING SIGNAL: {active_green_lane} → {next_green_lane}")
+                        signal_phases.append({'lane': str(active_green_lane), 'duration': float(phase_duration)})
+                        events.append({
+                            'eventType': 'signal_phase',
+                            'laneId': str(active_green_lane),
+                            'timestamp': run_start_ms + int(current_time * 1000),
+                            'payload': {'lane': str(active_green_lane), 'duration': float(phase_duration)},
+                        })
+                    
+                    if next_green_lane != active_green_lane:
+                        print(f"SWITCHING SIGNAL: {active_green_lane} → {next_green_lane}")
+                    
                     active_green_lane = next_green_lane
                     phase_start_time = float(current_time)
                     with shared_lock:
                         shared_state['active_green_lane'] = active_green_lane
+                        shared_state['phase_start_time'] = phase_start_time
                         shared_state['latest_signal_phases'] = list(signal_phases)
 
                 print("\n===== RL DEBUG =====")
@@ -1941,35 +1990,49 @@ def run_pipeline(
                 # Flush tracker-backed lifecycle events on the sample tick.
                 event_ts = run_start_ms + int(current_time * 1000)
 
+                # Update track_metadata for all currently tracked detections
                 for det in last_tracked_detection_result['tracked_detections']:
                     track_id = det.get('track_id')
                     lane_id = det.get('lane')
                     label = det.get('label')
                     if track_id is None or not lane_id:
                         continue
-
                     vehicle_id = str(track_id)
                     track_metadata[vehicle_id] = {
                         'laneId': lane_id,
                         'vehicleType': label,
                     }
 
-                for vehicle_id in sorted(pending_vehicle_added):
-                    metadata = track_metadata.get(vehicle_id, {})
-                    events.append(
-                        {
-                            'eventType': 'vehicle_added',
-                            'vehicleId': vehicle_id,
-                            'vehicleType': metadata.get('vehicleType'),
-                            'laneId': metadata.get('laneId'),
-                            'timestamp': event_ts,
-                            'payload': {},
-                        }
-                    )
-                    active_tracks.add(vehicle_id)
-                    pending_vehicle_added.discard(vehicle_id)
+                # ✅ FIX: Emit vehicle_added for newly created tracks
+                # Use new_tracks_data for lane/label (available immediately on creation)
+                # fallback to track_metadata for confirmed tracks
+                new_tracks_data = last_tracked_detection_result.get('new_tracks_data', {})
+                for new_track_id in last_tracked_detection_result.get('new_track_ids', []):
+                    vehicle_id = str(new_track_id)
+                    if vehicle_id not in active_tracks:
+                        # Priority: new_tracks_data (has lane from frame of creation)
+                        track_info = new_tracks_data.get(new_track_id, {})
+                        metadata = track_metadata.get(vehicle_id, {})
+                        lane_id = track_info.get('lane') or metadata.get('laneId')
+                        vtype   = track_info.get('label') or metadata.get('vehicleType')
+                        # Update track_metadata with this info for future crossed events
+                        if lane_id:
+                            track_metadata[vehicle_id] = {'laneId': lane_id, 'vehicleType': vtype}
+                        events.append(
+                            {
+                                'eventType': 'vehicle_added',
+                                'vehicleId': vehicle_id,
+                                'vehicleType': vtype,
+                                'laneId': lane_id,
+                                'timestamp': event_ts,
+                                'payload': {},
+                            }
+                        )
+                        active_tracks.add(vehicle_id)
 
-                for vehicle_id in sorted(pending_vehicle_crossed):
+                # ✅ FIX: Emit vehicle_crossed for tracks that crossed the exit line this tick
+                for crossed_track_id in last_tracked_detection_result.get('crossed_track_ids', []):
+                    vehicle_id = str(crossed_track_id)
                     metadata = track_metadata.get(vehicle_id, {})
                     events.append(
                         {
@@ -1983,15 +2046,32 @@ def run_pipeline(
                     )
                     active_tracks.discard(vehicle_id)
                     track_metadata.pop(vehicle_id, None)
-                    pending_vehicle_crossed.discard(vehicle_id)
+
+                # ✅ FIX: Emit vehicle_crossed for removed (disappeared) tracks not yet crossed
+                for removed_track_id in last_tracked_detection_result.get('removed_track_ids', []):
+                    vehicle_id = str(removed_track_id)
+                    if vehicle_id in active_tracks:
+                        metadata = track_metadata.get(vehicle_id, {})
+                        events.append(
+                            {
+                                'eventType': 'vehicle_crossed',
+                                'vehicleId': vehicle_id,
+                                'vehicleType': metadata.get('vehicleType'),
+                                'laneId': metadata.get('laneId'),
+                                'timestamp': event_ts,
+                                'payload': {},
+                            }
+                        )
+                        active_tracks.discard(vehicle_id)
+                        track_metadata.pop(vehicle_id, None)
 
                 snapshot = build_snapshot(
                     lane_state,
                     timestamp=current_time,
                     active_green_lane=active_green_lane,
-                    line_counts=line_counts,
-                    wait_time_by_direction=wait_time_by_direction,
-                    queue_length_by_direction=queue_length_by_direction,
+                    line_counts=dict(last_tracked_detection_result.get('crossed_by_lane', line_counts)),
+                    wait_time_by_direction=dict(last_tracked_detection_result.get('wait_time_by_direction', wait_time_by_direction)),
+                    queue_length_by_direction=dict(last_tracked_detection_result.get('queue_length_by_direction', queue_length_by_direction)),
                     signal_phases=signal_phases,
                 )
                 overlay = draw_overlay(
@@ -2092,6 +2172,7 @@ def run_pipeline(
                         threading.Thread(target=flush_batch_thread, args=(batch_to_send,), daemon=True).start()
 
                 if tick * tick_seconds >= timer_duration:
+                    print(f"[PIPELINE] Timer expired at tick={tick}, duration={timer_duration}s. Breaking.")
                     break
 
                 overlay_to_show = last_overlay if last_overlay is not None else frame
@@ -2102,8 +2183,14 @@ def run_pipeline(
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
 
-            frame_index += 1
-            time.sleep(frame_delay)
+            # In batch mode: jump to next sampled frame directly
+            # In realtime mode: step frame by frame (1 at a time)
+            if not realtime and sample_every_n > 1:
+                frame_index += sample_every_n
+            else:
+                frame_index += 1
+            if realtime:
+                time.sleep(frame_delay)
     finally:
         stop_event.set()
         detection_thread.join(timeout=2.0)

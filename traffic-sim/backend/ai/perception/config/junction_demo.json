@@ -1,0 +1,85 @@
+{
+  "name": "whatsapp_intersection_2026_04_15",
+  "timer_duration": 180,
+  "lane_regions": {
+    "north": {
+      "id": "north",
+      "label": "north",
+      "direction": "incoming",
+      "points": [
+        [170, 0],
+        [680, 0],
+        [590, 210],
+        [260, 210]
+      ],
+      "polygon": [
+        [170, 0],
+        [680, 0],
+        [590, 210],
+        [260, 210]
+      ]
+    },
+    "south": {
+      "id": "south",
+      "label": "south",
+      "direction": "incoming",
+      "points": [
+        [220, 270],
+        [600, 270],
+        [720, 478],
+        [100, 478]
+      ],
+      "polygon": [
+        [220, 270],
+        [600, 270],
+        [720, 478],
+        [100, 478]
+      ]
+    },
+    "east": {
+      "id": "east",
+      "label": "east",
+      "direction": "incoming",
+      "points": [
+        [490, 100],
+        [848, 80],
+        [848, 400],
+        [490, 380]
+      ],
+      "polygon": [
+        [490, 100],
+        [848, 80],
+        [848, 400],
+        [490, 380]
+      ]
+    },
+    "west": {
+      "id": "west",
+      "label": "west",
+      "direction": "incoming",
+      "points": [
+        [0, 80],
+        [360, 100],
+        [360, 380],
+        [0, 400]
+      ],
+      "polygon": [
+        [0, 80],
+        [360, 100],
+        [360, 380],
+        [0, 400]
+      ]
+    }
+  },
+  "settings": {
+    "min_avg_confidence": 0.10,
+    "max_count_jump": 5,
+    "confidence_hold_ticks": 1,
+    "smooth_alpha": 0.2,
+    "tracker_min_seen_frames": 2,
+    "tracker_max_missed_frames": 10
+  },
+  "homography": {
+    "enabled": false
+  }
+}
