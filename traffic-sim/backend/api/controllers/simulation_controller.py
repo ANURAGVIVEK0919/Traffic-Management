@@ -57,6 +57,10 @@ def resolve_session_id(identifier):
 
 	return identifier
 
+# Store last computation time per session to avoid O(N^2) bottlenecks
+last_computation_time = {}
+import time
+
 # Handle event log submission and metrics computation
 def handle_submit_log(session_id, events):
     import os
@@ -82,13 +86,26 @@ def handle_submit_log(session_id, events):
         conn.close()
         timer_duration = row[0] if row else 0
 
-        # ✅ FIX: Compute metrics from ALL session events (not just current batch)
-        # This ensures correct incremental results throughout the video pipeline
-        all_session_events = get_events_for_session(session_id)
-        dynamic_results = compute_dynamic_metrics(all_session_events, timer_duration)
-        static_results = compute_static_metrics(all_session_events, timer_duration)
+        # Debounce heavy metric computation (only every 5s)
+        current_time = time.time()
+        should_recompute = (current_time - last_computation_time.get(session_id, 0)) > 5.0
         
-        if DEBUG: print(f"[CONTROLLER] metrics from {len(all_session_events)} total events")
+        dynamic_results = {}
+        static_results = {}
+
+        if should_recompute:
+            all_session_events = get_events_for_session(session_id)
+            dynamic_results = compute_dynamic_metrics(all_session_events, timer_duration)
+            static_results = compute_static_metrics(all_session_events, timer_duration)
+            last_computation_time[session_id] = current_time
+            if DEBUG: print(f"[CONTROLLER] recomputed metrics from {len(all_session_events)} events")
+        else:
+            # Fetch existing results if we skip recomputing
+            # This keeps the dashboard showing something while we wait for next recompute
+            existing = get_simulation_results(session_id)
+            if existing:
+                dynamic_results = existing.get('dynamic', {})
+                static_results = existing.get('static', {})
 
         # Extract latest lane state for WebSocket broadcast
         lane_counts = [0, 0, 0, 0]

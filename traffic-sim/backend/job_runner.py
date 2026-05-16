@@ -243,7 +243,7 @@ async def run_video_pipeline_job(job_id: str, video_path: str):
 
         # Reuse the upload session_id as simulation session
         # (same pattern: upload → session → events → results)
-        session_id = ensure_session_exists(job_id)
+        session_id = ensure_session_exists(job_id, timer_duration)
         job_store[job_id]["session_id"] = session_id
 
         print(f"[JOB RUNNER] job_id={job_id} session_id={session_id} "

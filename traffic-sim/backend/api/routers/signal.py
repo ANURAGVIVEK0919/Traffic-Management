@@ -88,18 +88,18 @@ def get_next_signal_decision(state: TrafficState):
     obs = []
     # Counts (4)
     for lane in ["north", "west", "south", "east"]:
-        obs.append(state.lane_counts.get(lane, 0) / 10.0)
+        obs.append(state.lane_counts.get(lane, 0) / 25.0)
     # Wait Times (4)
     for lane in ["north", "west", "south", "east"]:
-        obs.append(state.wait_times.get(lane, 0.0) / 30.0)
+        obs.append(state.wait_times.get(lane, 0.0) / 80.0)
     # Ambulances (4)
     for lane in ["north", "west", "south", "east"]:
         obs.append(1.0 if state.ambulance.get(lane, False) else 0.0)
     
     # Yellow flag (1)
-    obs.append(1.0 if state.elapsed_time > 25 else 0.0) # Placeholder or actual flag
+    obs.append(1.0 if state.elapsed_time > 25 else 0.0) 
     # Elapsed Time (1)
-    obs.append(state.elapsed_time / 30.0)
+    obs.append(state.elapsed_time / 20.0)
     # Active Lane Index (1)
     lanes_ordered = ["north", "west", "south", "east"]
     obs.append(lanes_ordered.index(state.current_lane) / 3.0)
@@ -119,6 +119,10 @@ def get_next_signal_decision(state: TrafficState):
     # 3. Predict action (0 = Stay, 1 = Switch)
     action = agent.act(observation)
     
+    if os.getenv("DEBUG_AI", "true").lower() == "true":
+        print(f"🤖 [DQN] State (normed): {np.array2string(observation, precision=2, separator=',')}")
+        print(f"🤖 [DQN] Action Decision: {'SWITCH' if action == 1 else 'STAY'}")
+
     return {"action": "switch" if action == 1 else "stay"}
 
 

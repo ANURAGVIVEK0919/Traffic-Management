@@ -44,9 +44,13 @@ LANE_COLORS = {
     'west': (255, 128, 0),
 }
 
-COUNT_NORMALIZATION_SCALE = 10.0
-WAIT_NORMALIZATION_SCALE = 30.0
+COUNT_NORMALIZATION_SCALE = 25.0
+WAIT_NORMALIZATION_SCALE = 80.0
+ELAPSED_NORMALIZATION_SCALE = 20.0
 TRAFFIC_DIRECTIONS = ('north', 'south', 'east', 'west')
+LANE_ORDER = ['north', 'west', 'south', 'east'] # 🔄 Cyclic order from training
+MIN_GREEN = 8.0  # ⏳ Minimum 8s green time
+MAX_GREEN = 25.0 # ⏳ Maximum 25s green time
 WAIT_SPEED_THRESHOLD_PX = 3.0
 DEFAULT_QUEUE_ROI_DEPTH_PX = 140
 
@@ -98,9 +102,18 @@ def load_config(config_path):
 
 
 def post_json(url, payload, timeout=20):
-    response = requests.post(url, json=payload, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ [API ERROR] URL: {url}")
+        print(f"❌ [API ERROR] Status: {e.response.status_code}")
+        print(f"❌ [API ERROR] Response: {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"❌ [API ERROR] URL: {url} - Error: {e}")
+        raise
 
 
 def _scale_points(points, scale_x=1.0, scale_y=1.0):
@@ -1360,6 +1373,7 @@ def run_pipeline(
     active_tracks = set()
     previous_frame_tracks = set()
     track_metadata = {}
+    count_history = {lane: deque(maxlen=10) for lane in ('north', 'east', 'south', 'west')}
     pending_vehicle_added = set()
     pending_vehicle_crossed = set()
     writer = None
@@ -1550,7 +1564,56 @@ def run_pipeline(
 
             last_processed_seq = frame_seq
 
+    def rl_worker():
+        """
+        🤖 RL Worker: Periodically polls the DQN model for STAY/SWITCH decisions.
+        Ensures the perception loop remains high-FPS by offloading AI inference.
+        """
+        last_processed_tick = -1
+        while not stop_event.is_set():
+            with shared_lock:
+                frame_seq = shared_state['latest_lane_state_seq']
+                lane_state = shared_state['latest_lane_state']
+                active_lane = shared_state['active_green_lane']
+                phase_start = shared_state['phase_start_time']
+                current_time = shared_state['latest_frame_time']
+                wait_times = shared_state['latest_wait_time_by_direction']
+
+            if frame_seq == last_processed_tick or not lane_state or active_lane is None:
+                time.sleep(0.05)
+                continue
+
+            try:
+                # 1. Prepare observation state for DQN
+                payload = {
+                    "lane_counts": {l: lane_state.get(l, {}).get('count', 0) for l in LANE_ORDER},
+                    "wait_times": wait_times,
+                    "ambulance": {l: lane_state.get(l, {}).get('hasAmbulance', False) for l in LANE_ORDER},
+                    "current_lane": active_lane,
+                    "elapsed_time": current_time - phase_start
+                }
+                
+                # 2. Poll Backend DQN Agent
+                resp = post_json(f"{base_url}/signal/next_decision", payload, timeout=1)
+                
+                if resp and 'action' in resp:
+                    with shared_lock:
+                        # 3. Enforce Cyclic Logic: Switch means go to the NEXT lane in cycle
+                        if resp['action'] == 'switch':
+                            curr_idx = LANE_ORDER.index(active_lane)
+                            next_lane = LANE_ORDER[(curr_idx + 1) % 4]
+                            shared_state['latest_decision'] = {'lane': next_lane, 'duration': 10}
+                        else:
+                            # Stay means keep current lane
+                            shared_state['latest_decision'] = {'lane': active_lane, 'duration': 10}
+                
+                last_processed_tick = frame_seq
+            except Exception as e:
+                if DEBUG: print(f"⚠️ [RL WORKER] Polling failed: {e}")
+                time.sleep(0.5)
+
     detection_thread = threading.Thread(target=detection_worker, name='detection_thread', daemon=True)
+    rl_thread = threading.Thread(target=rl_worker, name='rl_thread', daemon=True)
 
     reset_tracking_state()
     tracker.reset()
@@ -1566,6 +1629,7 @@ def run_pipeline(
 
     if not cached_data:
         detection_thread.start()
+        rl_thread.start()
     else:
         # Optimization: Map cached data by frame_idx for O(1) lookup
         cache_map = {item['frame_idx']: item for item in cached_data}
@@ -1604,7 +1668,7 @@ def run_pipeline(
             if not ok:
                 break
 
-            if frame_index % 150 == 0:
+            if frame_index % 30 == 0:
                 elapsed = time.time() - (run_start_ms / 1000)
                 pct = int((frame_index / max(total_frames, 1)) * 100)
                 print(f"[PIPELINE] frame={frame_index}/{total_frames} ({pct}%) elapsed={elapsed:.0f}s")
@@ -1755,9 +1819,15 @@ def run_pipeline(
             if sum(current_counts.values()) == 0 and len(active_vehicles) == 0:
                 if DEBUG: print("NO VEHICLES → sending zeros (no skip)")
 
+            # 🛡️ TEMPORAL SMOOTHING: Use rolling average to prevent flickering
+            for lane in TRAFFIC_DIRECTIONS:
+                count_history[lane].append(current_counts.get(lane, 0))
+                # Rounding the average provides a stable state for the DQN
+                current_counts[lane] = int(round(sum(count_history[lane]) / len(count_history[lane])))
+
             last_counts = current_counts.copy()
             if DEBUG:
-                print("LANE COUNTS:", current_counts)
+                print("LANE COUNTS (SMOOTHED):", current_counts)
             final_counts_array = [
                 int(current_counts.get("north", 0)),
                 int(current_counts.get("south", 0)),
@@ -1776,7 +1846,7 @@ def run_pipeline(
 
             # --- V2I/VOICE AMBULANCE INTEGRATION ---
             v2i_ambulances = {lane: False for lane in TRAFFIC_DIRECTIONS}
-            if frame_index % 10 == 0: # Poll V2I status every 10 frames (~2s)
+            if realtime and frame_index % 10 == 0:
                 try:
                     v2i_resp = requests.get(f"{base_url}/v2i/active", timeout=1)
                     if v2i_resp.status_code == 200:
@@ -1955,11 +2025,33 @@ def run_pipeline(
 
                 print("RL DECISION:", decision)
 
-                next_green_lane = (decision.get('lane') if isinstance(decision, dict) else decision) or active_green_lane
-                phase_duration = max(0.0, float(current_time) - float(phase_start_time))
+                # --- ENFORCE CYCLIC & MIN GREEN CONSTRAINTS ---
+                # current_time and phase_start_time are in seconds
+                phase_duration = float(current_time) - float(phase_start_time)
+                
+                # Decision comes from rl_worker (Stay current or Switch to Next in Cycle)
+                rl_recommended_lane = (decision.get('lane') if isinstance(decision, dict) else decision) or active_green_lane
+                
+                # Default: Stay in current lane
+                next_green_lane = active_green_lane
+                
+                # 1. First Priority: MIN_GREEN must be satisfied (No early switches)
+                if phase_duration < MIN_GREEN:
+                    next_green_lane = active_green_lane
+                
+                # 2. Second Priority: MAX_GREEN exceeded (Force switch)
+                elif phase_duration >= MAX_GREEN:
+                    curr_idx = LANE_ORDER.index(active_green_lane)
+                    next_green_lane = LANE_ORDER[(curr_idx + 1) % 4]
+                    if DEBUG: print(f"⏳ [TIMEOUT] MAX_GREEN reached ({phase_duration:.1f}s). Forcing switch.")
+                
+                # 3. Third Priority: Follow RL Decision (Only after MIN_GREEN)
+                elif rl_recommended_lane != active_green_lane:
+                    next_green_lane = rl_recommended_lane
+                    if DEBUG: print(f"🤖 [DQN] Switching to {next_green_lane} as recommended.")
 
-                # Log if lane switched OR if we've been on the same lane for > 60s
-                if next_green_lane != active_green_lane or phase_duration >= 60.0:
+                # --- LOGGING & STATE UPDATE ---
+                if next_green_lane != active_green_lane:
                     if active_green_lane is not None:
                         signal_phases.append({'lane': str(active_green_lane), 'duration': float(phase_duration)})
                         events.append({
@@ -1969,8 +2061,7 @@ def run_pipeline(
                             'payload': {'lane': str(active_green_lane), 'duration': float(phase_duration)},
                         })
                     
-                    if next_green_lane != active_green_lane:
-                        print(f"SWITCHING SIGNAL: {active_green_lane} → {next_green_lane}")
+                    print(f"SWITCHING SIGNAL: {active_green_lane} → {next_green_lane} (after {phase_duration:.1f}s)")
                     
                     active_green_lane = next_green_lane
                     phase_start_time = float(current_time)
@@ -2174,6 +2265,12 @@ def run_pipeline(
                 if tick * tick_seconds >= timer_duration:
                     print(f"[PIPELINE] Timer expired at tick={tick}, duration={timer_duration}s. Breaking.")
                     break
+
+                if on_progress:
+                    pct = int((tick * tick_seconds / timer_duration) * 100)
+                    if pct > _last_progress_report:
+                        on_progress(pct)
+                        _last_progress_report = pct
 
                 overlay_to_show = last_overlay if last_overlay is not None else frame
                 if writer is not None:

@@ -8,7 +8,7 @@ from backend.core.services.results_service import cache_simulation_results
 DEBUG = True
 
 
-def ensure_session_exists(session_id):
+def ensure_session_exists(session_id, timer_duration=0):
     """Ensure the parent simulation_session row exists before child inserts."""
     session_id = str(session_id).strip() if session_id is not None else None
     if not session_id:
@@ -25,8 +25,12 @@ def ensure_session_exists(session_id):
             INSERT INTO simulation_session (id, timer_duration, created_at, status)
             VALUES (?, ?, ?, ?)
             """,
-            (session_id, 0, created_at, "running")
+            (session_id, timer_duration, created_at, "running")
         )
+        conn.commit()
+    elif timer_duration > 0:
+        # Update duration if it was created with 0 but now we have a real value
+        cursor.execute("UPDATE simulation_session SET timer_duration = ? WHERE id = ? AND (timer_duration = 0 OR timer_duration IS NULL)", (timer_duration, session_id))
         conn.commit()
     conn.close()
     print("Ensured session exists:", session_id)
@@ -83,6 +87,14 @@ def save_event_log(session_id, events):
             
             selected_lane = decision_data.get('lane') or decision_data.get('selected_lane') or event.get('laneId')
             duration = decision_data.get('duration')
+            
+            # Check snapshot if still None
+            snapshot = payload_dict.get('snapshot', {}) if isinstance(payload_dict.get('snapshot'), dict) else {}
+            if selected_lane is None:
+                selected_lane = snapshot.get('active_lane')
+            if duration is None:
+                duration = snapshot.get('duration')
+
             debug = decision_data.get('debug', {}) or payload_dict.get('debug', {})
             
             # Fallback for duration if still None
@@ -90,7 +102,9 @@ def save_event_log(session_id, events):
                 duration = payload_dict.get('duration')
 
             if selected_lane is None or duration is None:
-                if DEBUG: print(f"⚠️ [SIM SERVICE] Skipping decision log (missing lane/duration): lane={selected_lane}, dur={duration}")
+                if DEBUG: 
+                    print(f"⚠️ [SIM SERVICE] Skipping decision log (missing lane/duration): lane={selected_lane}, dur={duration}")
+                    print(f"   Payload: {json.dumps(payload_dict)}")
                 continue
 
             cursor.execute(

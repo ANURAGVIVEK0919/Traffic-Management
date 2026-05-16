@@ -522,7 +522,9 @@ def detect_vehicles_in_frame(frame, lane_regions, return_debug=False, current_ti
         for box in boxes:
             raw_cls = r.names[int(box.cls)]
             cls = map_detected_label(raw_cls)
-            if cls not in VEHICLE_CLASSES:
+            
+            # 🛡️ HARD FILTER: Ignore non-traffic noise (YOLO sometimes sees 'airplane', 'person', etc.)
+            if cls not in VEHICLE_CLASSES or cls in ('person', 'airplane', 'dog', 'umbrella'):
                 continue
 
             x1, y1, x2, y2 = box.xyxy[0].tolist()
