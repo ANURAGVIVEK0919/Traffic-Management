@@ -60,6 +60,8 @@ export default function SimulationPage() {
   const [interruptedRemainingTime, setInterruptedRemainingTime] = useState(0);
   const [v2iBeacons, setV2IBeacons] = useState([]);
   const [v2iAlertLane, setV2IAlertLane] = useState(null);
+  const [v2iSimulations, setV2ISimulations] = useState([]);
+  const v2iSimulationsRef = useRef([]);
 
   const status = useSimulationStore(state => state.status);
   const mode = useSimulationStore(state => state.mode);
@@ -283,22 +285,6 @@ export default function SimulationPage() {
         const response = await fetch('http://localhost:8000/v2i/active');
         const active = await response.json();
         
-        // Track crossed (removed) V2I beacons
-        const activeIds = active.map(b => b.vehicle_id);
-        v2iBeacons.forEach(b => {
-          if (!activeIds.includes(b.vehicle_id)) {
-            console.log(`📡 V2I Ambulance ${b.vehicle_id} cleared intersection.`);
-            logEvent({
-              eventType: 'vehicle_crossed',
-              vehicleId: b.vehicle_id,
-              vehicleType: 'ambulance',
-              laneId: b.lane,
-              timestamp: Date.now(),
-              payload: { isVirtual: true }
-            });
-          }
-        });
-
         setV2IBeacons(active);
 
         if (active.length > 0) {
@@ -381,6 +367,83 @@ export default function SimulationPage() {
 
       const simulatedTick = tickCountRef.current + 1;
       let activeGreenLane = currentGreenLaneRef.current;
+
+      // --- V2I Ambulance Simulation Updates ---
+      const updatedSims = [];
+      for (const sim of v2iSimulationsRef.current) {
+        if (sim.status === 'crossed') {
+          updatedSims.push(sim);
+          continue;
+        }
+
+        let newDist = sim.distance;
+        let newSpeed = sim.speed;
+        let newStatus = sim.status;
+        let newWaitTime = sim.waitTime;
+        let newQueuePos = sim.queuePosition;
+
+        if (newStatus === 'approaching') {
+          newDist = Math.max(0, newDist - newSpeed);
+          if (newDist === 0) {
+            newStatus = 'waiting';
+            newSpeed = 0.0;
+            newQueuePos = lanesRef.current[sim.lane]?.length || 0;
+            console.log(`📡 V2I Ambulance ${sim.vehicle_id} reached intersection. Queue: ${newQueuePos}`);
+          }
+        }
+
+        if (newStatus === 'waiting') {
+          newSpeed = 0.0;
+          const isLaneGreen = (activeGreenLane === sim.lane && !isYellowPhaseRef.current);
+
+          // If the light is green and we have a queue, vehicles clear at 1 vehicle/sec
+          if (isLaneGreen && newQueuePos > 0) {
+            newQueuePos = Math.max(0, newQueuePos - 1);
+          }
+
+          if (isLaneGreen && newQueuePos === 0) {
+            newStatus = 'crossed';
+            newDist = 0.0;
+            console.log(`📡 V2I Ambulance ${sim.vehicle_id} crossing after waiting ${newWaitTime}s!`);
+            logEvent({
+              eventType: 'vehicle_crossed',
+              vehicleId: sim.vehicle_id,
+              vehicleType: 'ambulance',
+              laneId: sim.lane,
+              timestamp: Date.now(),
+              payload: { isVirtual: true }
+            });
+          } else {
+            newWaitTime += 1;
+          }
+        }
+
+        const updatedSim = {
+          ...sim,
+          distance: newDist,
+          speed: newSpeed,
+          status: newStatus,
+          waitTime: newWaitTime,
+          queuePosition: newQueuePos
+        };
+        updatedSims.push(updatedSim);
+
+        // Update the backend beacon
+        if (newStatus !== 'crossed') {
+          fetch('http://localhost:8000/v2i/beacon', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicle_id: sim.vehicle_id,
+              lane: sim.lane,
+              distance: newDist,
+              speed: newSpeed
+            })
+          }).catch(e => console.warn('V2I update failed:', e));
+        }
+      }
+      v2iSimulationsRef.current = updatedSims;
+      setV2ISimulations(updatedSims);
 
       const elapsedTimeBeforeScan = Math.max(0, simulatedTick - phaseStartTickRef.current);
       if (!emergencyPhaseRef.current && activeGreenLane) {
@@ -733,6 +796,8 @@ export default function SimulationPage() {
     currentGreenLaneRef.current = null;
     phaseStartTickRef.current = 0;
     setTotalVehiclesCrossed(0);
+    setV2ISimulations([]);
+    v2iSimulationsRef.current = [];
     tickingRef.current = true;
   }
 
@@ -794,6 +859,21 @@ export default function SimulationPage() {
   async function handleTriggerV2I(laneId) {
     try {
       const vid = `V2I-AMB-${Math.floor(Math.random() * 1000)}`;
+      
+      const newSim = {
+        vehicle_id: vid,
+        lane: laneId,
+        distance: 400.0,
+        speed: 15.0,
+        status: 'approaching',
+        waitTime: 0,
+        spawnedAt: Date.now(),
+        queuePosition: null
+      };
+      
+      v2iSimulationsRef.current = [...v2iSimulationsRef.current, newSim];
+      setV2ISimulations(v2iSimulationsRef.current);
+
       await fetch('http://localhost:8000/v2i/beacon', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1089,27 +1169,60 @@ export default function SimulationPage() {
                   <div className="siren-pulse-ring-slow"></div>
                 </div>
                 <div className="v2i-beacons-list">
-                  {v2iBeacons.map(beacon => (
-                    <div key={beacon.vehicle_id} className="v2i-beacon-item v2i-alert-active">
-                      <div className="v2i-beacon-info">
-                        <span className="v2i-beacon-id">📡 GPS: {beacon.vehicle_id}</span>
-                        <span className="v2i-beacon-lane">{beacon.lane.toUpperCase()} INTERSECTION APPROACH</span>
-                      </div>
-                      <div className="v2i-beacon-stats">
-                        <div className="v2i-stat">
-                          <label>Distance (GPS)</label>
-                          <span>{Math.round(beacon.distance)}m</span>
+                  {v2iBeacons.map(beacon => {
+                    const sim = v2iSimulations.find(s => s.vehicle_id === beacon.vehicle_id);
+                    const isWaiting = sim?.status === 'waiting';
+                    const isCrossed = sim?.status === 'crossed';
+                    
+                    let etaText = `${beacon.eta}s`;
+                    let distText = `${Math.round(beacon.distance)}m`;
+                    let statusText = 'Approaching Intersection (GPS Siren Active)';
+                    
+                    if (isWaiting) {
+                      etaText = `🛑 WAITING`;
+                      distText = `0m (Wait: ${sim.waitTime}s)`;
+                      statusText = sim.queuePosition > 0 
+                        ? `Stopped behind ${sim.queuePosition} vehicle(s) in queue`
+                        : 'Waiting at stopline for green light';
+                    } else if (isCrossed) {
+                      etaText = `✅ PASSED`;
+                      distText = `Passed`;
+                      statusText = 'Intersection cleared successfully!';
+                    }
+                    
+                    return (
+                      <div key={beacon.vehicle_id} className={`v2i-beacon-item ${isWaiting ? 'v2i-alert-waiting' : isCrossed ? 'v2i-alert-passed' : 'v2i-alert-active'}`}>
+                        <div className="v2i-beacon-info">
+                          <span className="v2i-beacon-id">📡 GPS: {beacon.vehicle_id}</span>
+                          <span className="v2i-beacon-lane">{beacon.lane.toUpperCase()} LANE EMERGENCY APPROACH</span>
+                          <p className="v2i-beacon-subtitle" style={{ fontSize: '0.85rem', color: '#a0aec0', margin: '4px 0 0 0' }}>
+                            {statusText}
+                          </p>
                         </div>
-                        <div className="v2i-stat">
-                          <label>Siren ETA</label>
-                          <span className="v2i-eta-highlight pulse-text">{beacon.eta}s</span>
+                        <div className="v2i-beacon-stats">
+                          <div className="v2i-stat">
+                            <label>Distance (GPS)</label>
+                            <span style={{ color: isWaiting ? '#fc8181' : isCrossed ? '#68d391' : 'inherit' }}>{distText}</span>
+                          </div>
+                          <div className="v2i-stat">
+                            <label>Siren ETA</label>
+                            <span className={`v2i-eta-highlight ${isWaiting ? 'pulse-text-red' : isCrossed ? 'text-green' : 'pulse-text'}`} style={{ color: isWaiting ? '#fc8181' : isCrossed ? '#68d391' : '#f6ad55' }}>
+                              {etaText}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="v2i-progress">
+                          <div 
+                            className={`v2i-progress-fill ${isWaiting ? 'bg-red' : isCrossed ? 'bg-green' : 'siren-bg'}`} 
+                            style={{ 
+                              width: isCrossed ? '100%' : `${Math.max(0, (1 - (sim?.distance || beacon.distance) / 400) * 100)}%`,
+                              backgroundColor: isWaiting ? '#fc8181' : isCrossed ? '#48bb78' : undefined
+                            }} 
+                          />
                         </div>
                       </div>
-                      <div className="v2i-progress">
-                        <div className="v2i-progress-fill siren-bg" style={{ width: `${Math.max(0, (1 - beacon.distance / 500) * 100)}%` }} />
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </Section>
             )}

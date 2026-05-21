@@ -813,6 +813,39 @@ h3 {
   border-left: 4px solid #ff3b30 !important;
 }
 
+.v2i-alert-waiting {
+  background: rgba(239, 68, 68, 0.08) !important;
+  border-left: 4px solid #ef4444 !important;
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.15);
+}
+
+.v2i-alert-passed {
+  background: rgba(72, 187, 120, 0.08) !important;
+  border-left: 4px solid #48bb78 !important;
+}
+
+.pulse-text-red {
+  color: #ef4444;
+  animation: text-flicker-red 0.5s infinite alternate;
+}
+
+@keyframes text-flicker-red {
+  from { opacity: 1; text-shadow: 0 0 10px rgba(239, 68, 68, 0.8); }
+  to { opacity: 0.5; text-shadow: 0 0 2px rgba(239, 68, 68, 0.2); }
+}
+
+.bg-red {
+  background: #ef4444 !important;
+}
+
+.bg-green {
+  background: #48bb78 !important;
+}
+
+.text-green {
+  color: #48bb78;
+}
+
 @media (max-width: 900px) {
   .dashboard {
     flex-direction: column;

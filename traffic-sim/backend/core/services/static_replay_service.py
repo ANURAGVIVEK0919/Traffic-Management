@@ -70,6 +70,8 @@ def run_static_replay_simulation(events, timer_duration):
             while vehicle_index[lane] < len(timeline[lane]):
                 v = timeline[lane][vehicle_index[lane]]
                 arrival_time = (float(v.get('timestamp', 0)) - sim_start) / 1000.0
+                if 'v2i' in str(v.get('vehicleId')).lower() or 'ambulance' in str(v.get('vehicleType')).lower():
+                    arrival_time += 26.67  # 400m travel time at 15m/s
                 if arrival_time <= current_time:
                     queues[lane].append({
                         'vid': v.get('vehicleId'),
@@ -124,9 +126,11 @@ def run_dynamic_replay_simulation(events, timer_duration):
     """
     Tick-by-tick simulation for Dynamic/Adaptive controller.
     Follows exact frontend simulation rules:
-    - Sequential lane switching (North -> East -> South -> West).
+    - Sequential lane switching (North -> East -> South -> West) under normal flow.
     - Green duration is dynamically determined by current queue length (min 5s, max 25s).
     - 5s yellow phase between switches.
+    - Emergency/Preemption override: Instantly yellow-transits the active lane,
+      switches green to the emergency lane, and keeps it green until the emergency clears.
     """
     parsed = parse_event_log(events)
     timeline = reconstruct_vehicle_timeline(parsed)
@@ -160,10 +164,34 @@ def run_dynamic_replay_simulation(events, timer_duration):
     current_green_duration = MIN_GREEN
     is_yellow_phase = False
     
-    # Calculate duration for the very first lane
+    # Preemption State
+    emergency_phase = None  # 'pre-empting', 'active', 'recovering'
+    emergency_lane = None
+    interrupted_lane = None
+    planned_duration = 0.0
+    
+    # Calculate duration for normal dynamic switching
     def calculate_duration(lane_id):
         queue_len = len(queues[lane_id])
         return max(MIN_GREEN, min(MAX_GREEN, queue_len * SATURATION_GAP))
+        
+    def has_active_emergency(lane_id, current_time):
+        # 1. Check if an emergency vehicle is already in the queue
+        for v in queues[lane_id]:
+            if 'v2i' in v['vid'].lower() or 'ambulance' in v['type'].lower():
+                return True
+        # 2. Check if an upcoming emergency vehicle is approaching (V2I early warning)
+        idx = vehicle_index[lane_id]
+        while idx < len(timeline[lane_id]):
+            v = timeline[lane_id][idx]
+            v_arrived_at = (float(v.get('timestamp', 0)) - sim_start) / 1000.0
+            if 'v2i' in str(v.get('vehicleId')).lower() or 'ambulance' in str(v.get('vehicleType')).lower():
+                v_arrived_at += 26.67
+                # Early warning triggers 26.67 seconds before arrival (at 400m)
+                if v_arrived_at - 26.67 <= current_time < v_arrived_at:
+                    return True
+            idx += 1
+        return False
         
     for tick in range(total_ticks):
         current_time = float(tick)
@@ -173,6 +201,8 @@ def run_dynamic_replay_simulation(events, timer_duration):
             while vehicle_index[lane] < len(timeline[lane]):
                 v = timeline[lane][vehicle_index[lane]]
                 arrival_time = (float(v.get('timestamp', 0)) - sim_start) / 1000.0
+                if 'v2i' in str(v.get('vehicleId')).lower() or 'ambulance' in str(v.get('vehicleType')).lower():
+                    arrival_time += 26.67  # 400m travel time at 15m/s
                 if arrival_time <= current_time:
                     queues[lane].append({
                         'vid': v.get('vehicleId'),
@@ -186,26 +216,72 @@ def run_dynamic_replay_simulation(events, timer_duration):
         # Only evaluate initial duration once at t=0
         if current_time == 0.0:
             current_green_duration = calculate_duration(active_lane)
+            
+        # 2. Check for Preemption Alerts
+        if not emergency_phase:
+            for l in DIRECTIONS:
+                if l != active_lane and has_active_emergency(l, current_time):
+                    emergency_phase = 'pre-empting'
+                    emergency_lane = l
+                    interrupted_lane = active_lane
                     
-        # 2. Process Phase Transitions
+                    if not is_yellow_phase:
+                        is_yellow_phase = True
+                        phase_start_time = current_time
+                        planned_duration = YELLOW_TIME
+                    else:
+                        # Already yellow, let the current yellow transition finish
+                        planned_duration = max(1.0, YELLOW_TIME - (current_time - phase_start_time))
+                    break
+                    
+        # 3. Process Phase transitions
         phase_elapsed = current_time - phase_start_time
         
-        if not is_yellow_phase:
-            if phase_elapsed >= current_green_duration:
-                # Transition to Yellow
-                is_yellow_phase = True
-                phase_start_time = current_time
+        if emergency_phase:
+            if emergency_phase == 'pre-empting':
+                if phase_elapsed >= planned_duration:
+                    # Switch to emergency lane (Green)
+                    is_yellow_phase = False
+                    active_lane = emergency_lane
+                    active_lane_idx = LANE_ORDER.index(active_lane)
+                    phase_start_time = current_time
+                    emergency_phase = 'active'
+            elif emergency_phase == 'active':
+                # Stay green until the emergency clears
+                has_amb = has_active_emergency(active_lane, current_time)
+                if not has_amb and phase_elapsed >= MIN_GREEN:
+                    # Clear! Switch to Recovery Yellow
+                    emergency_phase = 'recovering'
+                    is_yellow_phase = True
+                    phase_start_time = current_time
+                    planned_duration = YELLOW_TIME
+            elif emergency_phase == 'recovering':
+                if phase_elapsed >= planned_duration:
+                    # Recover back to interrupted lane
+                    is_yellow_phase = False
+                    active_lane = interrupted_lane
+                    active_lane_idx = LANE_ORDER.index(active_lane)
+                    phase_start_time = current_time
+                    current_green_duration = calculate_duration(active_lane)
+                    
+                    emergency_phase = None
+                    emergency_lane = None
+                    interrupted_lane = None
         else:
-            if phase_elapsed >= YELLOW_TIME:
-                # Transition to Next Green Lane
-                is_yellow_phase = False
-                active_lane_idx = (active_lane_idx + 1) % len(LANE_ORDER)
-                active_lane = LANE_ORDER[active_lane_idx]
-                phase_start_time = current_time
-                # AI calculates duration exactly when the light turns green
-                current_green_duration = calculate_duration(active_lane)
-                
-        # 3. Process crossing logic (only if green)
+            # Normal Dynamic Phase Logic
+            if not is_yellow_phase:
+                if phase_elapsed >= current_green_duration:
+                    is_yellow_phase = True
+                    phase_start_time = current_time
+            else:
+                if phase_elapsed >= YELLOW_TIME:
+                    is_yellow_phase = False
+                    active_lane_idx = (active_lane_idx + 1) % len(LANE_ORDER)
+                    active_lane = LANE_ORDER[active_lane_idx]
+                    phase_start_time = current_time
+                    current_green_duration = calculate_duration(active_lane)
+                    
+        # 4. Process crossing logic (only if green)
         if not is_yellow_phase:
             if current_time - last_cross_time[active_lane] >= SATURATION_GAP:
                 if len(queues[active_lane]) > 0:
@@ -219,8 +295,8 @@ def run_dynamic_replay_simulation(events, timer_duration):
                         'crossedAt': current_time
                     })
                     last_cross_time[active_lane] = current_time
-
-    # Add wait time for vehicles still stuck in the queue at the end of the simulation
+                    
+    # Add wait time for vehicles still stuck in queue at the end
     for lane, queue in queues.items():
         for v in queue:
             wait_time = float(timer_duration) - v['arrivedAt']
@@ -231,9 +307,8 @@ def run_dynamic_replay_simulation(events, timer_duration):
                 'arrivedAt': v['arrivedAt'],
                 'crossedAt': None
             })
-
+            
     return {'wait_time_records': wait_time_records}
-
 
 def compute_dynamic_metrics(events, timer_duration=None):
     parsed = parse_event_log(events)
