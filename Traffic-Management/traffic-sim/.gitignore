@@ -1,0 +1,25 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Database
+traffic_sim.db
+*.sqlite3
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Uploads / Data
+uploads/
+data/*.json
+!data/README.md
+debug_frame.jpg

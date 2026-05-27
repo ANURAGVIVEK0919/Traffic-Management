@@ -1,0 +1,573 @@
+# 🚦 Adaptive Traffic Management System
+
+A full-stack traffic signal control platform combining **real-time YOLOv8 vehicle detection**, a **rule-based adaptive signal controller**, and an **interactive React simulation** to optimize traffic flow at 4-way intersections.
+
+---
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [System Architecture](#system-architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Backend Setup](#backend-setup)
+  - [Frontend Setup](#frontend-setup)
+  - [Running the Application](#running-the-application)
+- [How It Works](#how-it-works)
+  - [Signal Control Logic](#signal-control-logic)
+  - [Simulation Mode](#simulation-mode)
+  - [Video Mode](#video-mode)
+- [API Reference](#api-reference)
+- [Database Schema](#database-schema)
+- [Configuration](#configuration)
+- [Performance Metrics](#performance-metrics)
+
+---
+
+## Overview
+
+This system provides two operating modes:
+
+1. **Manual Simulation Mode** — An interactive browser-based 4-way intersection where users manually spawn vehicles (cars, bikes, trucks, buses, ambulances). The adaptive signal controller dynamically adjusts green-light durations based on real-time queue weight — no fixed timers.
+
+2. **Video Mode** — Upload a real traffic video. The backend runs a full YOLOv8 detection and tracking pipeline, extracting a timestamped vehicle event schedule frame-by-frame. That schedule is then replayed in the frontend simulation in real time, with the adaptive controller making live green-phase decisions driven by actual video data.
+
+After any simulation completes, a **Comparison Dashboard** displays side-by-side metrics comparing the adaptive system against a static fixed-timer baseline: average wait time, vehicles crossed, CO₂ estimate, green utilization, and ambulance wait time.
+
+---
+
+## Key Features
+
+| Feature | Description |
+|---|---|
+| 🎥 **Video Upload & Processing** | Upload MP4 traffic videos; backend extracts per-frame vehicle detections via YOLOv8 |
+| 🧠 **Adaptive Signal Controller** | Rule-based controller dynamically scales green-phase duration based on real-time vehicle queue weight |
+| 🚑 **Emergency Vehicle Preemption** | Ambulance detection triggers immediate signal preemption with a proper yellow-phase transition |
+| 📡 **WebSocket Live Updates** | Real-time lane counts and signal state pushed from backend to frontend after every event batch |
+| 📊 **Comparison Dashboard** | Side-by-side adaptive vs. static benchmarking with Recharts bar charts and KPI cards |
+| 🗺️ **Homography Support** | Bird's-eye-view lane mapping via configurable homography transform for top-down perspective |
+| 🎬 **Auto Demo Scenarios** | URL-driven automated demos: `?demo=true`, `?scenario=high_traffic`, `?scenario=emergency`, `?scenario=master` |
+| 📦 **Async Job System** | Video processing runs in a background thread with live job-status polling from the frontend |
+| 🗃️ **SQLite Persistence** | All sessions, events, signal decisions, and results stored in a local SQLite database |
+
+---
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        FRONTEND (React)                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐│
+│  │VideoUploadPage│  │SimulationPage│  │    DashboardPage       ││
+│  │              │  │              │  │  (Recharts + metrics)  ││
+│  │ Upload video │  │ Tick engine  │  │                        ││
+│  │ Poll job     │  │ Vehicle spawn│  │ Adaptive vs Static     ││
+│  │ Start sim    │  │ WS listener  │  │ comparison             ││
+│  └──────┬───────┘  └──────┬───────┘  └──────────┬─────────────┘│
+│         │  REST           │  WebSocket           │ REST          │
+└─────────┼─────────────────┼──────────────────────┼──────────────┘
+          ▼                 ▼                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      BACKEND (FastAPI)                          │
+│                                                                 │
+│  Routers:  /upload  │  /jobs  │  /simulation/*                  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              Simulation Controller                      │   │
+│  │  create_session · submit_log · get_results              │   │
+│  │  get_latest_results · log_signal · get_report           │   │
+│  └───────────────────────┬─────────────────────────────────┘   │
+│                          │                                      │
+│  ┌───────────────────────▼──────────────────┐                  │
+│  │              Services Layer              │                  │
+│  │  simulation_service  · results_service   │                  │
+│  │  static_replay_service                   │                  │
+│  └───────────────────────┬──────────────────┘                  │
+│                          │                                      │
+│  ┌───────────────────────▼──────────────────┐                  │
+│  │         Job Runner (Background Thread)   │                  │
+│  │  run_video_pipeline_job                  │                  │
+│  │  → state_extractor → video_pipeline      │                  │
+│  └───────────────────────┬──────────────────┘                  │
+│                          │                                      │
+│  ┌───────────────────────▼──────────────────┐                  │
+│  │     Perception / Detection Layer         │                  │
+│  │  YOLOv8 Detector (yolo_traffic.pt)       │                  │
+│  │  StableTracker · SimpleVehicleTracker    │                  │
+│  │  HomographyLaneMapper · LaneProcessor    │                  │
+│  └───────────────────────┬──────────────────┘                  │
+│                          │                                      │
+│  ┌───────────────────────▼──────────────────┐                  │
+│  │              SQLite Database             │                  │
+│  │  session · event · result · decision_log │                  │
+│  └──────────────────────────────────────────┘                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow — Video Mode
+
+```
+Video File (.mp4)
+    │
+    ▼
+YOLOv8 Detector  (models/yolo_traffic.pt)
+    │   per-frame bounding boxes + class labels
+    ▼
+StableTracker + SimpleVehicleTracker
+    │   track IDs, lane membership, wait times
+    ▼
+State Extractor
+    │   produces timestamped vehicle event schedule
+    ▼
+Job Store (in-memory) ──► Frontend polls /jobs/{id}/status
+    │
+    ▼
+Frontend: VideoSchedule Playback
+    │   fires vehicle spawn events in real time
+    ▼
+Tick Engine (1 s interval) — Adaptive Signal Controller
+    │   scales green duration by vehicle queue weight
+    │   handles emergency preemption
+    ▼
+submit-log → Backend → compute_dynamic_metrics
+    │
+    ▼
+WebSocket Broadcast → Frontend lane counts + active lane
+    │
+    ▼
+Dashboard: /simulation/results/{sessionId}
+```
+
+---
+
+## Tech Stack
+
+### Backend
+
+| Library | Purpose |
+|---|---|
+| **FastAPI** | Async REST API + WebSocket server |
+| **Uvicorn** | ASGI server |
+| **Ultralytics YOLOv8** | Real-time vehicle detection |
+| **OpenCV** | Frame extraction, polygon drawing, homography |
+| **NumPy** | Numerical operations |
+| **aiofiles** | Async file I/O for video uploads |
+| **SQLite3** | Embedded database (Python stdlib) |
+
+### Frontend
+
+| Library | Purpose |
+|---|---|
+| **React 18** | Component-driven UI |
+| **React Router v6** | Client-side routing |
+| **Zustand** | Lightweight global state management |
+| **React Three Fiber / Drei / Three.js** | 3D intersection rendering |
+| **Recharts** | Bar charts on the dashboard |
+
+---
+
+## Project Structure
+
+```
+Traffic-Management/
+├── README.md
+├── .gitignore
+└── traffic-sim/
+    ├── traffic_sim.db            # SQLite database (auto-created on startup)
+    │
+    ├── models/
+    │   └── yolo_traffic.pt       # Custom YOLOv8 traffic detection model (6.2 MB)
+    │
+    ├── data/                     # Training datasets (gitignored)
+    ├── uploads/                  # Uploaded video files (runtime, gitignored)
+    │
+    ├── backend/
+    │   ├── main.py               # FastAPI app entry point
+    │   ├── requirements.txt      # Python dependencies
+    │   ├── job_runner.py         # Background video processing job manager
+    │   │
+    │   ├── routers/
+    │   │   ├── simulation.py     # /simulation/* endpoints + WebSocket
+    │   │   ├── upload.py         # /upload/video endpoint
+    │   │   └── jobs.py           # /jobs/start + /jobs/{id}/status
+    │   │
+    │   ├── controllers/
+    │   │   └── simulation_controller.py  # Session management, metric computation
+    │   │
+    │   ├── services/
+    │   │   ├── simulation_service.py     # DB writes: sessions, events, results
+    │   │   ├── results_service.py        # DB reads: result formatting, comparison
+    │   │   └── static_replay_service.py  # Simulates static-timer baseline metrics
+    │   │
+    │   ├── agent/
+    │   │   ├── yolo_detector.py   # YOLOv8 inference + multi-frame track management
+    │   │   └── stable_tracker.py  # IoU + centroid-based vehicle tracker
+    │   │
+    │   ├── perception/
+    │   │   ├── video_pipeline.py  # Main video processing pipeline
+    │   │   ├── state_extractor.py # Extracts full simulation schedule from video
+    │   │   ├── lane_processing.py # Polygon region helpers
+    │   │   ├── homography.py      # Homography transform for bird's-eye-view mapping
+    │   │   ├── session_report.py  # Builds per-session summary report
+    │   │   ├── calibrate_lanes.py          # Interactive lane calibration tool
+    │   │   ├── calibrate_lanes_polygon.py  # Polygon-based lane calibration tool
+    │   │   └── config/            # Per-video lane region JSON configs
+    │   │       ├── junction_demo.json
+    │   │       └── symmetric_config.json
+    │   │
+    │   ├── database/
+    │   │   ├── db.py              # SQLite connection factory
+    │   │   ├── models.py          # CREATE TABLE definitions
+    │   │   └── shared_state.py    # In-process video processing state flag
+    │   │
+    │   ├── state/
+    │   │   └── simulation_state.py  # In-memory latest_results dict + threading lock
+    │   │
+    │   └── utils/
+    │       ├── event_parser.py    # Parse raw event log into structured timeline
+    │       └── metrics.py         # Compute wait time, utilization, CO₂ helpers
+    │
+    └── frontend/
+        ├── package.json
+        └── src/
+            ├── App.jsx            # Root router — 4 routes
+            ├── index.js           # React DOM mount
+            │
+            ├── pages/
+            │   ├── SimulationPage.jsx  # Main intersection UI + tick engine + signal FSM
+            │   ├── VideoUploadPage.jsx # Upload flow + job polling + simulation launch
+            │   ├── DashboardPage.jsx   # Results comparison dashboard
+            │   ├── LoadingPage.jsx     # Transition page post-simulation
+            │   └── dashboard.css       # Shared page styles
+            │
+            ├── components/
+            │   ├── controls/      # TimerControl
+            │   ├── layout/        # AppSidebar
+            │   ├── simulation/    # Intersection canvas components
+            │   └── ui/            # Card, Button, Section primitives
+            │
+            ├── services/
+            │   └── api.js         # Fetch wrappers for all backend endpoints
+            │
+            ├── state/
+            │   └── simulationStore.js  # Zustand store (lanes, lights, session, mode)
+            │
+            └── utils/
+                ├── simulationUtils.js  # buildLaneSnapshot, generateVehicleId
+                ├── vehicleUtils.js     # moveVehicles, checkVehicleCrossing
+                └── dashboardUtils.js   # determineWinner for metric comparison
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **Python 3.10+**
+- **Node.js 18+** and **npm**
+- A GPU is recommended for YOLOv8 inference but CPU fallback works
+
+### Backend Setup
+
+```powershell
+cd "Traffic-Management\traffic-sim"
+
+# Create and activate virtual environment
+python -m venv venv
+.\venv\Scripts\activate
+
+# Install dependencies
+pip install -r backend\requirements.txt
+```
+
+### Frontend Setup
+
+```powershell
+cd "Traffic-Management\traffic-sim\frontend"
+npm install
+```
+
+### Running the Application
+
+Open **two terminals** simultaneously.
+
+**Terminal 1 — Backend**
+
+```powershell
+cd "Traffic-Management\traffic-sim"
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+API: `http://localhost:8000`  
+Interactive docs: `http://localhost:8000/docs`
+
+**Terminal 2 — Frontend**
+
+```powershell
+cd "Traffic-Management\traffic-sim\frontend"
+npm start
+```
+
+App: `http://localhost:3000`
+
+---
+
+## How It Works
+
+### Signal Control Logic
+
+The signal controller is a **rule-based adaptive algorithm** running inside the frontend tick engine (one tick = one second).
+
+**Green phase duration** is computed dynamically each tick:
+
+```
+target = clamp(
+    sum of vehicle time weights in active lane + vehicles crossed this phase,
+    MIN_GREEN = 8s,
+    MAX_GREEN = 30s
+)
+```
+
+Vehicle time weights: `car=1.0`, `bike=0.5`, `ambulance=1.0`, `truck=2.0`, `bus=2.5`
+
+**Phase transitions follow this finite state machine:**
+
+```
+[Initial warm-up: 4 fixed cycles of 8s each]
+        ↓
+[Adaptive mode: dynamic green duration per queue weight]
+        ↓
+[Yellow phase: 5s countdown before every lane switch]
+        ↓
+[Switch to next lane]
+```
+
+**Emergency preemption** interrupts this cycle when an ambulance is detected in a non-green lane:
+
+```
+Ambulance detected in lane X (not green)
+    → Yellow phase starts on current lane
+    → After yellow: switch green to lane X
+    → Wait for ambulance to clear (min 8s)
+    → Yellow phase again
+    → Resume interrupted lane
+```
+
+### Simulation Mode
+
+1. Go to `http://localhost:3000`
+2. Set a timer duration with the **Timer Control**
+3. Click **Start** to begin
+4. Use the vehicle buttons (🚗 🚲 🚑 🚚 🚌) in each lane card to spawn vehicles manually
+5. Watch the signal controller adaptively manage green time based on queue state
+6. When the timer hits 0, you're redirected to the **Dashboard** with full metrics
+
+#### Auto Demo Scenarios
+
+| URL | Description |
+|---|---|
+| `/?demo=true` | Mixed traffic demo, auto-spawning |
+| `/?scenario=high_traffic` | Dense vehicle spawning every 800ms |
+| `/?scenario=emergency` | Regular traffic + ambulance every 35s |
+| `/?scenario=master` | Scripted sequence showcasing all features in order |
+
+### Video Mode
+
+1. Go to `/upload`
+2. Select a video file and click **Upload Video**
+   - Backend saves to `uploads/` and returns `session_id` + `video_path`
+3. Click **Start Processing**
+   - Backend spawns a background thread running YOLOv8 + tracking
+   - Frontend polls `/jobs/{session_id}/status` every 2 seconds
+4. When status is `completed`, click **Start Simulation**
+   - Vehicle event schedule loaded into frontend state
+   - Simulation runs in **video mode** — vehicles spawn from the video schedule
+   - WebSocket syncs lane counts from backend in real time
+5. After timer expires, the Dashboard shows adaptive vs. static comparison
+
+#### Lane Calibration for New Videos
+
+Generate a lane config JSON for any new video:
+
+```powershell
+# Click-based calibration
+python -m backend.perception.calibrate_lanes --video uploads/myvideo.mp4 --output backend/perception/config/myvideo.json
+
+# Polygon-based calibration
+python -m backend.perception.calibrate_lanes_polygon --video uploads/myvideo.mp4 --output backend/perception/config/myvideo.json
+```
+
+---
+
+## API Reference
+
+All endpoints served at `http://localhost:8000`.
+
+### Upload
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/upload/video` | Upload a video file (multipart/form-data). Returns `session_id` and `video_path` |
+
+### Jobs
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/jobs/start` | Start background video processing. Body: `{ session_id, video_path }` |
+| `GET` | `/jobs/{session_id}/status` | Poll job status. Returns `status`, `progress`, `video_events`, `video_duration` |
+
+### Simulation
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/simulation/start` | Create a session. Body: `{ timer_duration }`. Returns `session_id` |
+| `POST` | `/simulation/submit-log` | Submit batch of events. Triggers metric computation + WebSocket broadcast |
+| `POST` | `/simulation/log` | Log a single signal phase (lane + duration) |
+| `POST` | `/simulation/video-frame` | Push a raw JPEG frame for MJPEG streaming |
+| `GET` | `/simulation/results/latest` | Get latest lane counts and active lane for a session |
+| `GET` | `/simulation/results/{id}` | Get final formatted simulation results |
+| `GET` | `/simulation/results?rl_id=&static_id=` | Compare two sessions side by side |
+| `GET` | `/simulation/decision-log/{id}` | Get all signal decision log entries for a session |
+| `GET` | `/simulation/report/{id}` | Get structured session summary report |
+| `GET` | `/video_feed` | MJPEG stream of the latest processed frame |
+
+### WebSocket
+
+| Endpoint | Description |
+|---|---|
+| `ws://localhost:8000/ws/simulation/{session_id}` | Backend pushes `{ lane_counts, active_lane, duration, timestamp }` after each `submit-log` |
+
+---
+
+## Database Schema
+
+SQLite database (`traffic_sim.db`) is auto-created on first startup.
+
+```sql
+-- Tracks each simulation run
+CREATE TABLE simulation_session (
+    id            TEXT PRIMARY KEY,   -- UUID
+    timer_duration INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,       -- ISO 8601 UTC
+    status        TEXT NOT NULL        -- 'running' | 'completed'
+);
+
+-- Raw event log from the frontend tick engine
+CREATE TABLE simulation_event (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    timestamp    REAL NOT NULL,
+    event_type   TEXT NOT NULL,        -- 'vehicle_added' | 'vehicle_crossed' | 'rl_decision' | ...
+    lane_id      TEXT,
+    vehicle_type TEXT,
+    vehicle_id   TEXT,
+    payload      TEXT                  -- JSON blob
+);
+
+-- Computed metrics per session (one row 'dynamic', one row 'static')
+CREATE TABLE simulation_result (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id               TEXT NOT NULL,
+    system_type              TEXT NOT NULL,   -- 'dynamic' | 'static'
+    avg_wait_time            REAL,
+    total_vehicles_crossed   INTEGER,
+    co2_estimate             REAL,
+    avg_green_utilization    REAL,
+    ambulance_avg_wait_time  REAL,
+    created_at               TEXT NOT NULL
+);
+
+-- Per-phase signal decisions
+CREATE TABLE simulation_decision_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    tick_number    INTEGER,
+    timestamp      REAL NOT NULL,
+    selected_lane  TEXT NOT NULL,
+    duration       INTEGER,
+    strategy       TEXT,
+    snapshot       TEXT,              -- JSON lane state snapshot
+    decision_debug TEXT              -- JSON debug info
+);
+
+-- Key-value store for shared runtime state
+CREATE TABLE shared_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL               -- JSON encoded
+);
+```
+
+---
+
+## Configuration
+
+### YOLO Model
+
+The detector loads `models/yolo_traffic.pt` by default. This can be overridden via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `YOLO_MODEL_SOURCE` | `local` | `local` or `hf` (HuggingFace) |
+| `YOLO_LOCAL_MODEL_PATH` | `models/yolo_traffic.pt` | Path to local `.pt` file |
+| `YOLO_HF_REPO_ID` | `Perception365/VehicleNet-Y26s` | HF repo for remote download |
+| `YOLO_CONFIDENCE_THRESHOLD` | `0.25` | Minimum detection confidence |
+
+### Tracker Tuning
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRACK_MATCH_DISTANCE` | `80` | Max pixel distance for track association |
+| `TRACK_MAX_MISSED_FRAMES` | `12` | Frames before a track is dropped |
+| `LOST_TRACK_RESTORE_WINDOW_SECONDS` | `3.0` | Window to re-associate a re-entering vehicle |
+| `LANE_ENTRY_BUFFER_PX` | `24` | Buffer pixels for lane polygon expansion |
+
+### Signal Controller Constants
+
+These are set in `SimulationPage.jsx`:
+
+| Constant | Value | Description |
+|---|---|---|
+| `MIN_GREEN` | `8s` | Minimum green phase duration |
+| `MAX_GREEN` | `30s` | Maximum green phase duration |
+| `YELLOW_TIME` | `5s` | Yellow phase duration before every switch |
+| `INITIAL_CYCLE_TIME` | `8s` | Fixed duration for the first 4 warm-up cycles |
+
+---
+
+## Performance Metrics
+
+The Dashboard computes and displays these metrics after each session:
+
+| Metric | Description |
+|---|---|
+| **Average Wait Time (s)** | Mean time vehicles spend waiting at red |
+| **Total Vehicles Crossed** | Count of vehicles that cleared the intersection |
+| **CO₂ Estimate (g)** | Estimated idle emissions (`avg_wait_time × 2.3`) |
+| **Green Utilization (%)** | Percentage of green time with active vehicle flow |
+| **Ambulance Wait Time (s)** | Mean wait time for emergency vehicles specifically |
+
+Each metric is compared between **Adaptive** (this system) and **Static** (fixed 30s/lane baseline). An uplift percentage shows how much the adaptive system improved relative to the static baseline.
+
+---
+
+## Supported Vehicle Classes
+
+| Class | Icon | Green Time Weight |
+|---|---|---|
+| `car` | 🚗 | 1.0× |
+| `bike` / `motorcycle` | 🚲 | 0.5× |
+| `ambulance` | 🚑 | 1.0× + triggers preemption |
+| `truck` | 🚚 | 2.0× |
+| `bus` | 🚌 | 2.5× |
+| `autorickshaw` | — | detected by YOLO, mapped to car weight |
+| `van` | — | detected by YOLO, mapped to car weight |
+
+---
+
+## License
+
+This project was developed as an academic/research prototype for intelligent traffic signal control using computer vision and adaptive control algorithms.

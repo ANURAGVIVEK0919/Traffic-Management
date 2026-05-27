@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+torch
+numpy
+ultralytics
+huggingface_hub
+opencv-python
+requests
+aiofiles
+matplotlib
+groq
+python-dotenv
+python-multipart
